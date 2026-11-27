@@ -129,6 +129,7 @@ object PinEditHistoryAudit {
         workEndMin: Int
     ): Int {
         if (workStartMin == workEndMin) return 0
+        RustCoreBridge.countOutsideWorkingHours(layerPins, workStartMin, workEndMin)?.let { return it }
         var count = 0
         val scratchCal = Calendar.getInstance()
         for (pin in layerPins) {

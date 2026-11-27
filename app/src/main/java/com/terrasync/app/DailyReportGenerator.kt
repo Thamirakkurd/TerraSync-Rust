@@ -224,6 +224,7 @@ object DailyReportGenerator {
 
     fun deduplicatePins(pins: List<PinItem>): List<PinItem> {
         if (pins.size <= 1) return pins
+        RustCoreBridge.deduplicatePins(pins)?.let { return it }
         return pins
             .sortedWith(
                 compareByDescending<PinItem> {
@@ -325,6 +326,25 @@ object DailyReportGenerator {
     ): String {
         val now = TimeFormatters.reportTimestamp(System.currentTimeMillis())
         val syncBadge = syncBadgeOverride ?: if (isCloudLive) "Live Cloud" else "Local"
+        if (uniquePins.isNotEmpty() && RustCoreBridge.isAvailable()) {
+            val outsideLine = if (workStartMin != null && workEndMin != null) {
+                val lateCount = PinEditHistoryAudit.countOutsideWorkingHours(uniquePins, workStartMin, workEndMin)
+                val window = "${PinEditHistoryAudit.formatMinutes(workStartMin)}–${PinEditHistoryAudit.formatMinutes(workEndMin)}"
+                val editWord = if (lateCount == 1) "edit" else "edits"
+                "• ⏰ Outside Working Hours ($window): *$lateCount* $editWord"
+            } else ""
+            val knownForMap = if (allKnownPinsForDeviceMap.size >= uniquePins.size) allKnownPinsForDeviceMap else uniquePins
+            RustCoreBridge.buildDailyReportFromUnique(
+                folderName = folderName,
+                nowStr = now,
+                syncBadge = syncBadge,
+                dupSkipped = dupSkipped,
+                outsideWorkLine = outsideLine,
+                configuredDeviceAliases = configuredDeviceAliases,
+                knownPinsForDeviceMap = knownForMap,
+                uniquePins = uniquePins
+            )?.let { return it }
+        }
         if (uniquePins.isEmpty()) {
             return buildString {
                 appendLine("*${flattenSingleLine(folderName)} — Daily Field Report*")

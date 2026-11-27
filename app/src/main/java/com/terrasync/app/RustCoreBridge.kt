@@ -23,9 +23,16 @@ object RustCoreBridge {
     fun isAvailable(): Boolean = loaded
 
     fun activeModulesSummary(): String =
-        "KML I/O, TSR1 Routing, MVT Kurdish, PMTiles v3, Contours, Search, Viewport GeoJSON, Clusters, Lasso"
+        "KML/CSV I/O, TSR1/Nav, MVT Kurdish, PMTiles v3, Contours, Search, GeoJSON, Clusters, Lasso, Reports, Audit"
 
     @JvmStatic private external fun nativePing(): Int
+    @JvmStatic private external fun nativeDecodePolyline6(encoded: String): ByteArray?
+    @JvmStatic private external fun nativeLoadNavRoute(routeId: Long, coordsLngLat: DoubleArray): Boolean
+    @JvmStatic private external fun nativeTrackNavRoute(routeId: Long, expectedLen: Int, lat: Double, lng: Double, lastSegIdx: Int): ByteArray?
+    @JvmStatic private external fun nativeExportCsvFile(payload: ByteArray, outPath: String): Boolean
+    @JvmStatic private external fun nativeDecodeTerrariumGrid(pixels: IntArray, w: Int, h: Int, n: Int): FloatArray?
+    @JvmStatic private external fun nativeBuildContoursGeoJsonBatch(payload: ByteArray): ByteArray?
+    @JvmStatic private external fun nativeCountOutsideWorkingHours(payload: ByteArray): Int
     @JvmStatic private external fun nativeParseKmlBytes(data: ByteArray): ByteArray?
     @JvmStatic private external fun nativeParseKmlFile(path: String): ByteArray?
     @JvmStatic private external fun nativeBuildKmlBytes(payload: ByteArray): ByteArray?
@@ -50,12 +57,17 @@ object RustCoreBridge {
     @JvmStatic private external fun nativeQuerySearchIndex(version: Long, expectedLen: Int, queryPayload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeClearSearchIndex()
     @JvmStatic private external fun nativeLoadGeoPins(version: Long, payload: ByteArray): Boolean
+    @JvmStatic private external fun nativePatchGeoPins(oldVersion: Long, newVersion: Long, expectedLen: Int, payload: ByteArray): Boolean
     @JvmStatic private external fun nativeBuildPinsGeoJsonViewport(version: Long, expectedLen: Int, filterPayload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeClearGeoPins()
     @JvmStatic private external fun nativeBuildTracksGeoJsonViewport(payload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeFilterPinsInPolygon(version: Long, expectedLen: Int, payload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeAnalyzeSameCoordClusters(payload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeSortAndScorePins(payload: ByteArray): ByteArray?
+    @JvmStatic private external fun nativeFindExactStackedPins(version: Long, expectedLen: Int, payload: ByteArray): ByteArray?
+    @JvmStatic private external fun nativeDeduplicatePins(payload: ByteArray): ByteArray?
+    @JvmStatic private external fun nativeFindDuplicateExtraIds(payload: ByteArray): ByteArray?
+    @JvmStatic private external fun nativeBuildDailyReport(payload: ByteArray): ByteArray?
 
     fun parseKml(memBytes: ByteArray?, tempFile: File?, layerId: String): ParsedKml? {
         if (!loaded) return null
@@ -554,5 +566,323 @@ object RustCoreBridge {
         val bytes = ByteArray(len)
         buf.get(bytes)
         return String(bytes, Charsets.UTF_8)
+    }
+
+    fun findExactStackedPins(
+        version: Long,
+        pins: List<PinItem>,
+        targetPin: PinItem,
+        hiddenLayerIds: Set<String>,
+        visibleStatuses: Set<String>,
+        sentIds: Set<String>,
+        cellSize: Double = STACKED_CELL_SIZE
+    ): List<PinItem>? {
+        if (!loaded) return null
+        return runCatching {
+            val out = ByteArrayOutputStream(128 + hiddenLayerIds.size * 24 + sentIds.size * 24)
+            val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putDouble(v: Double) { nb.clear(); nb.putDouble(v); out.write(nb.array(), 0, 8) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+
+            putStr(targetPin.id)
+            putDouble(targetPin.lat)
+            putDouble(targetPin.lng)
+            putDouble(cellSize)
+            var mask = 0
+            if (PinStatus.DONE.key in visibleStatuses) mask = mask or 1
+            if (PinStatus.ISSUE.key in visibleStatuses) mask = mask or 2
+            if (PinStatus.PENDING.key in visibleStatuses) mask = mask or 4
+            out.write(mask)
+            putInt(hiddenLayerIds.size)
+            for (id in hiddenLayerIds) putStr(id)
+            putInt(sentIds.size)
+            for (id in sentIds) putStr(id)
+
+            val payload = out.toByteArray()
+            val res = nativeFindExactStackedPins(version, pins.size, payload) ?: run {
+                if (!syncGeoPins(version, pins)) return@runCatching null
+                nativeFindExactStackedPins(version, pins.size, payload) ?: return@runCatching null
+            }
+            val bb = ByteBuffer.wrap(res).order(ByteOrder.LITTLE_ENDIAN)
+            val cnt = bb.int.coerceAtLeast(0)
+            if (cnt == 0) return@runCatching listOf(targetPin)
+            val stack = ArrayList<PinItem>(cnt)
+            repeat(cnt) { pins.getOrNull(bb.int)?.let { stack.add(it) } }
+            if (stack.isEmpty()) listOf(targetPin) else stack
+        }.getOrNull()
+    }
+
+    fun deduplicatePins(pins: List<PinItem>): List<PinItem>? {
+        if (!loaded) return null
+        if (pins.size <= 1) return pins
+        return runCatching {
+            val out = ByteArrayOutputStream((pins.size * 72 + 16).coerceAtMost(8 * 1024 * 1024))
+            val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putLong(v: Long) { nb.clear(); nb.putLong(v); out.write(nb.array(), 0, 8) }
+            fun putDouble(v: Double) { nb.clear(); nb.putDouble(v); out.write(nb.array(), 0, 8) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+            putInt(pins.size)
+            for (p in pins) {
+                val st = PinStatus.fromRaw(p.status)
+                val code = when (st) { PinStatus.DONE -> 0; PinStatus.ISSUE -> 1; PinStatus.PENDING -> 2 }
+                val worked = st != PinStatus.PENDING || p.isEdited || p.editedAt > 0L || p.editHistory.isNotBlank()
+                putStr(p.id)
+                putStr(p.name)
+                putDouble(p.lat)
+                putDouble(p.lng)
+                out.write(code)
+                out.write(if (worked) 1 else 0)
+                putLong(p.editedAt)
+                putLong(p.updatedAt)
+            }
+            val res = nativeDeduplicatePins(out.toByteArray()) ?: return@runCatching null
+            val bb = ByteBuffer.wrap(res).order(ByteOrder.LITTLE_ENDIAN)
+            val cnt = bb.int.coerceAtLeast(0)
+            val kept = ArrayList<PinItem>(cnt)
+            repeat(cnt) { pins.getOrNull(bb.int)?.let { kept.add(it) } }
+            kept
+        }.getOrNull()
+    }
+
+    fun findDuplicateExtraIds(pins: List<PinItem>): Set<String>? {
+        if (!loaded) return null
+        if (pins.size < 2) return emptySet()
+        return runCatching {
+            val out = ByteArrayOutputStream((pins.size * 72 + 16).coerceAtMost(8 * 1024 * 1024))
+            val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putLong(v: Long) { nb.clear(); nb.putLong(v); out.write(nb.array(), 0, 8) }
+            fun putDouble(v: Double) { nb.clear(); nb.putDouble(v); out.write(nb.array(), 0, 8) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+            putInt(pins.size)
+            for (p in pins) {
+                val rank = when (PinStatus.fromRaw(p.status)) {
+                    PinStatus.DONE -> 3
+                    PinStatus.ISSUE -> 2
+                    PinStatus.PENDING -> if (p.isEdited) 1 else 0
+                }
+                putStr(p.id)
+                putStr(p.name)
+                putDouble(p.lat)
+                putDouble(p.lng)
+                out.write(rank)
+                putLong(p.editedAt)
+                putLong(p.updatedAt)
+            }
+            val res = nativeFindDuplicateExtraIds(out.toByteArray()) ?: return@runCatching null
+            val bb = ByteBuffer.wrap(res).order(ByteOrder.LITTLE_ENDIAN)
+            val cnt = bb.int.coerceAtLeast(0)
+            val extras = LinkedHashSet<String>(cnt)
+            repeat(cnt) { pins.getOrNull(bb.int)?.let { extras.add(it.id) } }
+            extras
+        }.getOrNull()
+    }
+
+    fun buildDailyReportFromUnique(
+        folderName: String,
+        nowStr: String,
+        syncBadge: String,
+        dupSkipped: Int,
+        outsideWorkLine: String,
+        configuredDeviceAliases: Map<String, String>,
+        knownPinsForDeviceMap: List<PinItem>,
+        uniquePins: List<PinItem>
+    ): String? {
+        if (!loaded) return null
+        return runCatching {
+            val out = ByteArrayOutputStream((uniquePins.size * 96 + 512).coerceAtMost(8 * 1024 * 1024))
+            val nb = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+
+            putStr(folderName)
+            putStr(nowStr)
+            putStr(syncBadge)
+            putInt(dupSkipped.coerceAtLeast(0))
+            putStr(outsideWorkLine)
+            putInt(configuredDeviceAliases.size)
+            for ((k, v) in configuredDeviceAliases) { putStr(k); putStr(v) }
+            putInt(knownPinsForDeviceMap.size)
+            for (p in knownPinsForDeviceMap) { putStr(p.editedBy); putStr(p.editHistory) }
+            putInt(uniquePins.size)
+            for (p in uniquePins) {
+                val code = when (PinStatus.fromRaw(p.status)) {
+                    PinStatus.DONE -> 0; PinStatus.ISSUE -> 1; PinStatus.PENDING -> 2
+                }
+                putStr(p.name)
+                out.write(code)
+                putStr(p.issueReason)
+                out.write(if (p.isEdited) 1 else 0)
+                putStr(p.editedBy)
+                putStr(p.editHistory)
+            }
+            val bytes = nativeBuildDailyReport(out.toByteArray()) ?: return@runCatching null
+            String(bytes, Charsets.UTF_8)
+        }.getOrNull()
+    }
+
+    fun decodePolyline6(encoded: String): List<Pair<Double, Double>>? {
+        if (!loaded || encoded.isEmpty()) return null
+        return runCatching {
+            val res = nativeDecodePolyline6(encoded) ?: return@runCatching null
+            val bb = ByteBuffer.wrap(res).order(ByteOrder.LITTLE_ENDIAN)
+            val cnt = bb.int.coerceAtLeast(0)
+            val out = ArrayList<Pair<Double, Double>>(cnt)
+            repeat(cnt) { out.add(bb.double to bb.double) }
+            out
+        }.getOrNull()
+    }
+
+    fun trackRouteProgress(
+        lat: Double,
+        lng: Double,
+        route: NavRoute,
+        lastSegIdx: Int = 0
+    ): RouteProgress? {
+        if (!loaded || route.geometry.size < 2) return null
+        return runCatching {
+            val geom = route.geometry
+            val routeId = System.identityHashCode(route).toLong()
+            val res = nativeTrackNavRoute(routeId, geom.size, lat, lng, lastSegIdx) ?: run {
+                val flat = DoubleArray(geom.size * 2)
+                for (i in geom.indices) {
+                    flat[i * 2] = geom[i].first
+                    flat[i * 2 + 1] = geom[i].second
+                }
+                if (!nativeLoadNavRoute(routeId, flat)) return@runCatching null
+                nativeTrackNavRoute(routeId, geom.size, lat, lng, lastSegIdx) ?: return@runCatching null
+            }
+            val bb = ByteBuffer.wrap(res).order(ByteOrder.LITTLE_ENDIAN)
+            val bestSegIdx = bb.int.coerceIn(0, geom.size - 2)
+            val offRouteM = bb.double
+            val traveledM = bb.double
+            val remainingM = bb.double
+            val projLat = bb.double
+            val projLng = bb.double
+            val remGeom = ArrayList<Pair<Double, Double>>(geom.size - bestSegIdx + 1)
+            remGeom.add(projLng to projLat)
+            for (i in (bestSegIdx + 1) until geom.size) remGeom.add(geom[i])
+            RouteProgress(
+                offRouteMeters = offRouteM,
+                traveledMeters = traveledM,
+                remainingMeters = remainingM,
+                snappedLat = projLat,
+                snappedLng = projLng,
+                segmentIndex = bestSegIdx,
+                remainingGeometry = remGeom
+            )
+        }.getOrNull()
+    }
+
+    fun exportCsvToFile(outFile: File, pins: List<PinItem>): Boolean {
+        if (!loaded) return false
+        return runCatching {
+            val out = ByteArrayOutputStream((pins.size * 128 + 64).coerceAtMost(8 * 1024 * 1024))
+            val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putDouble(v: Double) { nb.clear(); nb.putDouble(v); out.write(nb.array(), 0, 8) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+            putInt(pins.size)
+            for (p in pins) {
+                val timeStr = if (p.editedAt > 0L) TimeFormatters.csvTimestamp(p.editedAt) else ""
+                putStr(p.name)
+                putStr(statusLabel(p.status))
+                putStr(p.issueReason)
+                putStr(p.description)
+                putDouble(p.lat)
+                putDouble(p.lng)
+                putStr(p.editedBy)
+                putStr(timeStr)
+            }
+            nativeExportCsvFile(out.toByteArray(), outFile.absolutePath)
+        }.getOrDefault(false)
+    }
+
+    fun decodeTerrariumGrid(pixels: IntArray, w: Int, h: Int, n: Int): FloatArray? =
+        if (!loaded) null else runCatching { nativeDecodeTerrariumGrid(pixels, w, h, n) }.getOrNull()
+
+    fun buildContoursGeoJsonBatch(
+        zs: IntArray, xs: IntArray, ys: IntArray, ns: IntArray,
+        elevs: Array<FloatArray>, step: Int, majorStep: Int
+    ): String? {
+        if (!loaded) return null
+        return runCatching {
+            val totalFloats = elevs.sumOf { it.size }
+            val out = ByteArrayOutputStream(32 + zs.size * 20 + totalFloats * 4)
+            val nb = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putFloat(v: Float) { nb.clear(); nb.putFloat(v); out.write(nb.array(), 0, 4) }
+            putInt(step)
+            putInt(majorStep)
+            putInt(zs.size)
+            for (i in zs.indices) {
+                putInt(zs[i]); putInt(xs[i]); putInt(ys[i]); putInt(ns[i])
+                val arr = elevs[i]
+                putInt(arr.size)
+                for (v in arr) putFloat(v)
+            }
+            val bytes = nativeBuildContoursGeoJsonBatch(out.toByteArray()) ?: return@runCatching null
+            String(bytes, Charsets.UTF_8)
+        }.getOrNull()
+    }
+
+    fun countOutsideWorkingHours(layerPins: List<PinItem>, workStartMin: Int, workEndMin: Int): Int? {
+        if (!loaded) return null
+        if (workStartMin == workEndMin) return 0
+        val tz = java.util.TimeZone.getDefault()
+        if (tz.useDaylightTime()) return null
+        return runCatching {
+            val out = ByteArrayOutputStream((layerPins.size * 48 + 32).coerceAtMost(8 * 1024 * 1024))
+            val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putLong(v: Long) { nb.clear(); nb.putLong(v); out.write(nb.array(), 0, 8) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+            putInt(workStartMin)
+            putInt(workEndMin)
+            putLong(tz.rawOffset.toLong())
+            putInt(layerPins.size)
+            for (p in layerPins) {
+                putStr(p.editHistory)
+                val touched = p.isEdited || PinStatus.fromRaw(p.status) != PinStatus.PENDING || p.issueReason.isNotBlank()
+                out.write(if (touched) 1 else 0)
+                putLong(p.editedAt)
+                putLong(p.updatedAt)
+            }
+            val res = nativeCountOutsideWorkingHours(out.toByteArray())
+            if (res >= 0) res else null
+        }.getOrNull()
+    }
+
+    fun patchGeoPins(
+        oldVersion: Long,
+        newVersion: Long,
+        expectedLen: Int,
+        updatedPins: List<PinItem>
+    ): Boolean {
+        if (!loaded || updatedPins.isEmpty()) return false
+        return runCatching {
+            val out = ByteArrayOutputStream((updatedPins.size * 72 + 16).coerceAtMost(2 * 1024 * 1024))
+            val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putDouble(v: Double) { nb.clear(); nb.putDouble(v); out.write(nb.array(), 0, 8) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+            putInt(updatedPins.size)
+            for (p in updatedPins) {
+                putStr(p.id)
+                putStr(p.layerId)
+                putStr(p.name)
+                val code = when (PinStatus.fromRaw(p.status)) {
+                    PinStatus.DONE -> 0
+                    PinStatus.ISSUE -> 1
+                    PinStatus.PENDING -> 2
+                }
+                out.write(code)
+                putDouble(p.lng)
+                putDouble(p.lat)
+            }
+            nativePatchGeoPins(oldVersion, newVersion, expectedLen, out.toByteArray())
+        }.getOrDefault(false)
     }
 }

@@ -174,6 +174,7 @@ class PinsListController(
             )
 
         fun findDuplicateExtraIds(list: List<PinItem>): Set<String> {
+            RustCoreBridge.findDuplicateExtraIds(list)?.let { return it }
             val byKey = list.groupBy { pin -> DailyReportGenerator.pinDedupKey(pin) }
             val extras = linkedSetOf<String>()
             byKey.values.forEach { grp ->

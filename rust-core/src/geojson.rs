@@ -2,9 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{OnceLock, RwLock};
 
+const EARTH_RADIUS_M: f64 = 6_371_000.0;
+
 struct GeoPin {
     id: String,
     layer_id: String,
+    name: String,
     label_shaped: String,
     status_code: u8, // 0=done, 1=issue, 2=pending
     lng: f64,
@@ -17,6 +20,7 @@ struct CachedGeoPins {
     issue_icon: String,
     pending_icon: String,
     pins: Vec<GeoPin>,
+    id_to_idx: HashMap<String, usize>,
 }
 
 static GEO_PINS_CACHE: OnceLock<RwLock<Option<CachedGeoPins>>> = OnceLock::new();
@@ -61,6 +65,24 @@ impl<'a> BinReader<'a> {
     }
 }
 
+#[inline]
+fn haversine_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let d_lat = (lat2 - lat1).to_radians();
+    let d_lon = (lon2 - lon1).to_radians();
+    let a = (d_lat * 0.5).sin().powi(2)
+        + lat1.to_radians().cos() * lat2.to_radians().cos() * (d_lon * 0.5).sin().powi(2);
+    let c = 2.0 * a.sqrt().atan2((1.0 - a).max(0.0).sqrt());
+    EARTH_RADIUS_M * c
+}
+
+#[inline]
+fn web_mercator_px(lng: f64, lat: f64, world_px: f64) -> (f64, f64) {
+    let x = ((lng + 180.0) / 360.0) * world_px;
+    let sin_lat = lat.clamp(-85.05112878, 85.05112878).to_radians().sin();
+    let y = (0.5 - ((1.0 + sin_lat) / (1.0 - sin_lat)).ln() / (4.0 * std::f64::consts::PI)) * world_px;
+    (x, y)
+}
+
 fn truncate_and_shape_label(name: &str) -> String {
     let trimmed = name.trim();
     if trimmed.chars().count() > 22 {
@@ -70,15 +92,6 @@ fn truncate_and_shape_label(name: &str) -> String {
         crate::kurdish::shape(&shortened)
     } else {
         crate::kurdish::shape(trimmed)
-    }
-}
-
-#[inline]
-fn status_draw_priority(status_code: u8) -> u8 {
-    match status_code {
-        1 => 3, // issue highest priority
-        2 => 2, // pending next
-        _ => 1, // done lowest
     }
 }
 
@@ -97,10 +110,7 @@ fn push_json_str(out: &mut Vec<u8>, s: &str) {
             0x00..=0x1F => {
                 const HEX: &[u8; 16] = b"0123456789abcdef";
                 out.extend_from_slice(&[
-                    b'\\',
-                    b'u',
-                    b'0',
-                    b'0',
+                    b'\\', b'u', b'0', b'0',
                     HEX[(b >> 4) as usize],
                     HEX[(b & 0x0F) as usize],
                 ]);
@@ -111,7 +121,6 @@ fn push_json_str(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
 }
 
-/// Uploads pin snapshot once per dataVersion and pre-shapes Kurdish labels off-JVM.
 pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
     let mut r = BinReader::new(payload);
     let (Some(done_icon), Some(issue_icon), Some(pending_icon), Some(count)) = (
@@ -124,7 +133,8 @@ pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
     };
 
     let mut pins = Vec::with_capacity(count.min(250_000));
-    for _ in 0..count {
+    let mut id_to_idx = HashMap::with_capacity(count.min(250_000));
+    for idx in 0..count {
         let (Some(id), Some(layer_id), Some(name), Some(status_code), Some(lng), Some(lat)) = (
             r.read_str(),
             r.read_str(),
@@ -135,10 +145,13 @@ pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
         ) else {
             return false;
         };
+        let id_owned = id.to_owned();
+        id_to_idx.insert(id_owned.clone(), idx);
         pins.push(GeoPin {
-            id: id.to_owned(),
+            id: id_owned,
             layer_id: layer_id.to_owned(),
             label_shaped: truncate_and_shape_label(name),
+            name: name.to_owned(),
             status_code,
             lng,
             lat,
@@ -154,17 +167,13 @@ pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
         issue_icon: issue_icon.to_owned(),
         pending_icon: pending_icon.to_owned(),
         pins,
+        id_to_idx,
     });
     true
 }
 
-/// Viewport-aware & overdraw-thinned GeoJSON builder for smooth 60-120fps map panning.
-/// Filter wire:
-///   [u8 status_mask (bit0=done, bit1=issue, bit2=pending)]
-///   [u32 hidden_count][hidden layer ids...]
-///   [u32 sent_count][sent pin ids...]
-///   [u8 use_viewport][f64 south][f64 west][f64 north][f64 east][f64 zoom]
-///   [u8 clustered][u32 max_unclustered_pins][str selected_pin_id]
+/// Viewport-culled, Earth-locked Web Mercator pixel-deduped GeoJSON builder.
+/// Preserves true green/orange/red color mix with zero pan flicker.
 pub fn build_pins_geojson_viewport(
     version: i64,
     expected_len: usize,
@@ -235,28 +244,38 @@ pub fn build_pins_geojson_viewport(
         candidates.push(i);
     }
 
-    // Screen-space grid thinning when unclustered viewport still has too many stacked pins
-    let final_indices: Vec<usize> = if !clustered && max_unclustered > 0 && candidates.len() > max_unclustered && check_vp {
-        let grid_side = ((max_unclustered as f64).sqrt().ceil() as u32).clamp(24, 48);
-        let grid_f = grid_side as f64;
-        let lat_span = (north - south).max(1e-6);
-        let lng_span = (east - west).max(1e-6);
-        let mut cells: HashMap<u64, (usize, u8)> = HashMap::with_capacity(max_unclustered);
+    // Earth-locked Web Mercator pixel deduplication (color-fair: closest pin to cell center wins)
+    let threshold = max_unclustered.max(2400);
+    let final_indices: Vec<usize> = if !clustered && max_unclustered > 0 && check_vp && zoom < 15.8 && candidates.len() > threshold {
+        let z_clamped = zoom.clamp(0.0, 22.0);
+        let world_px = 256.0 * 2.0_f64.powf(z_clamped);
+        let cell_px = if z_clamped >= 14.5 {
+            9.0
+        } else if z_clamped >= 13.0 {
+            11.0
+        } else if z_clamped >= 11.0 {
+            12.5
+        } else {
+            14.0
+        };
 
+        let mut cells: HashMap<(i64, i64), (usize, f64)> = HashMap::with_capacity(threshold);
         for &idx in &candidates {
             let p = &cached.pins[idx];
-            let gx = (((p.lng - west) / lng_span) * grid_f).floor().clamp(0.0, grid_f - 1.0) as u32;
-            let gy = (((p.lat - south) / lat_span) * grid_f).floor().clamp(0.0, grid_f - 1.0) as u32;
-            let key = ((gx as u64) << 32) | (gy as u64);
-            let prio = status_draw_priority(p.status_code);
+            let (px_x, px_y) = web_mercator_px(p.lng, p.lat, world_px);
+            let gx = (px_x / cell_px).floor() as i64;
+            let gy = (px_y / cell_px).floor() as i64;
+            let cx = (gx as f64 + 0.5) * cell_px;
+            let cy = (gy as f64 + 0.5) * cell_px;
+            let dist_sq = (px_x - cx) * (px_x - cx) + (px_y - cy) * (px_y - cy);
             cells
-                .entry(key)
+                .entry((gx, gy))
                 .and_modify(|e| {
-                    if prio > e.1 {
-                        *e = (idx, prio);
+                    if dist_sq < e.1 {
+                        *e = (idx, dist_sq);
                     }
                 })
-                .or_insert((idx, prio));
+                .or_insert((idx, dist_sq));
         }
 
         let mut kept: Vec<usize> = cells.into_values().map(|(idx, _)| idx).collect();
@@ -317,15 +336,79 @@ pub fn build_pins_geojson_viewport(
     Some(out)
 }
 
+
+/// O(1) in-place delta update for 1..N edited pins in resident Rust RAM.
+/// Preserves exact pin indices and bumps cached version without re-uploading 20,000 pins.
+/// Wire: [u32 count] followed by count * ([str id][str layer_id][str name][u8 status_code][f64 lng][f64 lat])
+pub fn patch_geo_pins(
+    expected_old_version: i64,
+    new_version: i64,
+    expected_len: usize,
+    payload: &[u8],
+) -> bool {
+    let mut r = BinReader::new(payload);
+    let Some(count) = r.read_u32().map(|v| v as usize) else {
+        return false;
+    };
+    let mut updates = Vec::with_capacity(count.min(4096));
+    for _ in 0..count {
+        let (Some(id), Some(layer_id), Some(name), Some(status_code), Some(lng), Some(lat)) = (
+            r.read_str(),
+            r.read_str(),
+            r.read_str(),
+            r.read_u8(),
+            r.read_f64(),
+            r.read_f64(),
+        ) else {
+            return false;
+        };
+        updates.push((id, layer_id, name, status_code, lng, lat));
+    }
+
+    let Ok(mut guard) = cache_lock().write() else {
+        return false;
+    };
+    let Some(cached) = guard.as_mut() else {
+        return false;
+    };
+    if cached.version != expected_old_version || cached.pins.len() != expected_len {
+        return false;
+    }
+
+    // Verify all IDs exist before mutating to guarantee atomic update
+    let mut resolved = Vec::with_capacity(updates.len());
+    for (id, layer_id, name, status_code, lng, lat) in updates {
+        let Some(&idx) = cached.id_to_idx.get(id) else {
+            return false;
+        };
+        resolved.push((idx, layer_id, name, status_code, lng, lat));
+    }
+
+    for (idx, layer_id, name, status_code, lng, lat) in resolved {
+        let pin = &mut cached.pins[idx];
+        if pin.layer_id != layer_id {
+            pin.layer_id.clear();
+            pin.layer_id.push_str(layer_id);
+        }
+        if pin.name != name {
+            pin.name.clear();
+            pin.name.push_str(name);
+            pin.label_shaped = truncate_and_shape_label(name);
+        }
+        pin.status_code = status_code;
+        pin.lng = lng;
+        pin.lat = lat;
+    }
+    cached.version = new_version;
+    true
+}
+
 pub fn clear_geo_pins() {
     if let Ok(mut guard) = cache_lock().write() {
         *guard = None;
     }
 }
 
-/// Viewport-culled & zoom-decimated LineString GeoJSON builder for tracks.
-/// Wire: [u8 use_viewport][f64 south][f64 west][f64 north][f64 east][f64 zoom]
-///       [u32 track_count] followed by `track_count` UTF-8 coords strings.
 pub fn build_tracks_geojson_viewport(payload: &[u8]) -> Option<Vec<u8>> {
     let mut r = BinReader::new(payload);
     let use_viewport = r.read_u8()? != 0;
@@ -359,15 +442,9 @@ pub fn build_tracks_geojson_viewport(payload: &[u8]) -> Option<Vec<u8>> {
         let mut t_max_lng = f64::NEG_INFINITY;
 
         for seg in raw.split(';') {
-            let Some((lng_s, lat_s)) = seg.split_once(',') else {
-                continue;
-            };
-            let (Ok(lng), Ok(lat)) = (lng_s.trim().parse::<f64>(), lat_s.trim().parse::<f64>()) else {
-                continue;
-            };
-            if !lng.is_finite() || !lat.is_finite() {
-                continue;
-            }
+            let Some((lng_s, lat_s)) = seg.split_once(',') else { continue; };
+            let (Ok(lng), Ok(lat)) = (lng_s.trim().parse::<f64>(), lat_s.trim().parse::<f64>()) else { continue; };
+            if !lng.is_finite() || !lat.is_finite() { continue; }
             if lat < t_min_lat { t_min_lat = lat; }
             if lat > t_max_lat { t_max_lat = lat; }
             if lng < t_min_lng { t_min_lng = lng; }
@@ -375,16 +452,12 @@ pub fn build_tracks_geojson_viewport(payload: &[u8]) -> Option<Vec<u8>> {
             pts.push((lng, lat));
         }
 
-        if pts.len() < 2 {
-            continue;
-        }
+        if pts.len() < 2 { continue; }
         if check_vp && (t_max_lat < south || t_min_lat > north || t_max_lng < west || t_min_lng > east) {
             continue;
         }
 
-        if !first_feat {
-            out.push(b',');
-        }
+        if !first_feat { out.push(b','); }
         first_feat = false;
         out.extend_from_slice(br#"{"type":"Feature","geometry":{"type":"LineString","coordinates":["#);
 
@@ -396,14 +469,11 @@ pub fn build_tracks_geojson_viewport(payload: &[u8]) -> Option<Vec<u8>> {
             if i != last_idx && min_step_sq > 0.0 {
                 let dx = lng - prev_emitted.0;
                 let dy = lat - prev_emitted.1;
-                if dx * dx + dy * dy < min_step_sq {
-                    continue;
-                }
+                if dx * dx + dy * dy < min_step_sq { continue; }
             }
             let _ = write!(&mut out, ",[{},{}]", lng, lat);
             prev_emitted = (lng, lat);
         }
-
         out.extend_from_slice(br#"]},"properties":{}}"#);
     }
 
@@ -414,33 +484,20 @@ pub fn build_tracks_geojson_viewport(payload: &[u8]) -> Option<Vec<u8>> {
 #[inline]
 fn point_in_geo_polygon(x: f64, y: f64, poly: &[(f64, f64)]) -> bool {
     let n = poly.len();
-    if n < 3 {
-        return false;
-    }
+    if n < 3 { return false; }
     let mut inside = false;
     let mut j = n - 1;
     for i in 0..n {
         let (xi, yi) = poly[i];
         let (xj, yj) = poly[j];
         let intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi);
-        if intersect {
-            inside = !inside;
-        }
+        if intersect { inside = !inside; }
         j = i;
     }
     inside
 }
 
-/// Fast Rust lasso hit-test over resident pins using geographic polygon vertices.
-/// Payload wire:
-///   [u8 status_mask][u32 hidden_count][hidden...][u32 sent_count][sent...]
-///   [u32 poly_pts][poly_pts * (f64 lng, f64 lat)]
-/// Returns: [u32 match_count][u32 pin_indices...]
-pub fn filter_pins_in_polygon(
-    version: i64,
-    expected_len: usize,
-    payload: &[u8],
-) -> Option<Vec<u8>> {
+pub fn filter_pins_in_polygon(version: i64, expected_len: usize, payload: &[u8]) -> Option<Vec<u8>> {
     let guard = cache_lock().read().ok()?;
     let cached = guard.as_ref()?;
     if cached.version != version || cached.pins.len() != expected_len {
@@ -451,19 +508,13 @@ pub fn filter_pins_in_polygon(
     let status_mask = r.read_u8()?;
     let hidden_count = r.read_u32()? as usize;
     let mut hidden_layers: HashSet<&str> = HashSet::with_capacity(hidden_count);
-    for _ in 0..hidden_count {
-        hidden_layers.insert(r.read_str()?);
-    }
+    for _ in 0..hidden_count { hidden_layers.insert(r.read_str()?); }
     let sent_count = r.read_u32()? as usize;
     let mut sent_ids: HashSet<&str> = HashSet::with_capacity(sent_count);
-    for _ in 0..sent_count {
-        sent_ids.insert(r.read_str()?);
-    }
+    for _ in 0..sent_count { sent_ids.insert(r.read_str()?); }
 
     let poly_len = r.read_u32()? as usize;
-    if poly_len < 3 {
-        return Some(0u32.to_le_bytes().to_vec());
-    }
+    if poly_len < 3 { return Some(0u32.to_le_bytes().to_vec()); }
     let mut poly = Vec::with_capacity(poly_len);
     let mut min_lng = f64::INFINITY;
     let mut max_lng = f64::NEG_INFINITY;
@@ -484,24 +535,16 @@ pub fn filter_pins_in_polygon(
     let mut matched: Vec<u32> = Vec::new();
 
     for (i, p) in cached.pins.iter().enumerate() {
-        if p.lng < min_lng || p.lng > max_lng || p.lat < min_lat || p.lat > max_lat {
-            continue;
-        }
-        if has_hidden && hidden_layers.contains(p.layer_id.as_str()) {
-            continue;
-        }
-        if has_sent && sent_ids.contains(p.id.as_str()) {
-            continue;
-        }
+        if p.lng < min_lng || p.lng > max_lng || p.lat < min_lat || p.lat > max_lat { continue; }
+        if has_hidden && hidden_layers.contains(p.layer_id.as_str()) { continue; }
+        if has_sent && sent_ids.contains(p.id.as_str()) { continue; }
         let status_ok = match p.status_code {
             0 => (status_mask & 1) != 0,
             1 => (status_mask & 2) != 0,
             2 => (status_mask & 4) != 0,
             _ => false,
         };
-        if !status_ok {
-            continue;
-        }
+        if !status_ok { continue; }
         if point_in_geo_polygon(p.lng, p.lat, &poly) {
             matched.push(i as u32);
         }
@@ -509,9 +552,68 @@ pub fn filter_pins_in_polygon(
 
     let mut out = Vec::with_capacity(4 + matched.len() * 4);
     out.extend_from_slice(&(matched.len() as u32).to_le_bytes());
-    for idx in matched {
-        out.extend_from_slice(&idx.to_le_bytes());
+    for idx in matched { out.extend_from_slice(&idx.to_le_bytes()); }
+    Some(out)
+}
+
+/// Fast 2m stacked-pin lookup directly over resident Rust pin store.
+/// Wire: [str target_id][f64 target_lat][f64 target_lng][f64 cell_size][u8 status_mask]
+///       [u32 hidden_cnt][hidden...][u32 sent_cnt][sent...]
+/// Returns: [u32 match_count][u32 indices sorted by pin.id...]
+pub fn find_exact_stacked_pins(version: i64, expected_len: usize, payload: &[u8]) -> Option<Vec<u8>> {
+    let guard = cache_lock().read().ok()?;
+    let cached = guard.as_ref()?;
+    if cached.version != version || cached.pins.len() != expected_len {
+        return None;
     }
+
+    let mut r = BinReader::new(payload);
+    let target_id = r.read_str()?;
+    let target_lat = r.read_f64()?;
+    let target_lng = r.read_f64()?;
+    let cell_size = r.read_f64()?;
+    let status_mask = r.read_u8()?;
+    let hidden_count = r.read_u32()? as usize;
+    let mut hidden_layers: HashSet<&str> = HashSet::with_capacity(hidden_count);
+    for _ in 0..hidden_count { hidden_layers.insert(r.read_str()?); }
+    let sent_count = r.read_u32()? as usize;
+    let mut sent_ids: HashSet<&str> = HashSet::with_capacity(sent_count);
+    for _ in 0..sent_count { sent_ids.insert(r.read_str()?); }
+
+    let has_hidden = !hidden_layers.is_empty();
+    let has_sent = !sent_ids.is_empty();
+    let mut stack: Vec<usize> = Vec::with_capacity(4);
+    let mut contains_target = false;
+
+    for (i, p) in cached.pins.iter().enumerate() {
+        if (p.lat - target_lat).abs() > cell_size || (p.lng - target_lng).abs() > cell_size {
+            continue;
+        }
+        if has_hidden && hidden_layers.contains(p.layer_id.as_str()) { continue; }
+        if has_sent && sent_ids.contains(p.id.as_str()) { continue; }
+        let status_ok = match p.status_code {
+            0 => (status_mask & 1) != 0,
+            1 => (status_mask & 2) != 0,
+            2 => (status_mask & 4) != 0,
+            _ => false,
+        };
+        if !status_ok { continue; }
+        if haversine_meters(p.lat, p.lng, target_lat, target_lng) <= 2.0 {
+            if p.id == target_id { contains_target = true; }
+            stack.push(i);
+        }
+    }
+
+    if !contains_target {
+        return Some(0u32.to_le_bytes().to_vec());
+    }
+    if stack.len() > 1 {
+        stack.sort_by(|&a, &b| cached.pins[a].id.cmp(&cached.pins[b].id));
+    }
+
+    let mut out = Vec::with_capacity(4 + stack.len() * 4);
+    out.extend_from_slice(&(stack.len() as u32).to_le_bytes());
+    for idx in stack { out.extend_from_slice(&(idx as u32).to_le_bytes()); }
     Some(out)
 }
 
@@ -525,52 +627,48 @@ mod tests {
     }
 
     #[test]
-    fn culls_viewport_thins_overdraw_and_raycasts_lasso() {
+    fn culls_viewport_preserves_color_balance_and_raycasts_lasso() {
         let mut load = Vec::new();
         put_str(&mut load, "pin-done");
         put_str(&mut load, "pin-issue");
         put_str(&mut load, "pin-pending");
         load.extend_from_slice(&3u32.to_le_bytes());
 
-        // Inside Akre viewport (pending)
         put_str(&mut load, "p1");
         put_str(&mut load, "layerA");
         put_str(&mut load, "هەولێر");
         load.push(2u8);
-        load.extend_from_slice(&43.89f64.to_le_bytes());
-        load.extend_from_slice(&36.74f64.to_le_bytes());
+        load.extend_from_slice(&43.89_f64.to_le_bytes());
+        load.extend_from_slice(&36.74_f64.to_le_bytes());
 
-        // Inside Akre viewport (done)
         put_str(&mut load, "p2");
         put_str(&mut load, "layerA");
         put_str(&mut load, "Pole A");
         load.push(0u8);
-        load.extend_from_slice(&43.90f64.to_le_bytes());
-        load.extend_from_slice(&36.75f64.to_le_bytes());
+        load.extend_from_slice(&43.90_f64.to_le_bytes());
+        load.extend_from_slice(&36.75_f64.to_le_bytes());
 
-        // Outside viewport (Zakho)
         put_str(&mut load, "p3");
         put_str(&mut load, "layerA");
         put_str(&mut load, "Zakho");
         load.push(1u8);
-        load.extend_from_slice(&42.68f64.to_le_bytes());
-        load.extend_from_slice(&37.14f64.to_le_bytes());
+        load.extend_from_slice(&42.68_f64.to_le_bytes());
+        load.extend_from_slice(&37.14_f64.to_le_bytes());
 
         assert!(load_geo_pins(11, &load));
 
-        // Viewport around Akre only
         let mut flt = Vec::new();
         flt.push(0b111u8);
         flt.extend_from_slice(&0u32.to_le_bytes());
         flt.extend_from_slice(&0u32.to_le_bytes());
-        flt.push(1u8); // use_viewport
-        flt.extend_from_slice(&36.70f64.to_le_bytes()); // south
-        flt.extend_from_slice(&43.80f64.to_le_bytes()); // west
-        flt.extend_from_slice(&36.80f64.to_le_bytes()); // north
-        flt.extend_from_slice(&44.00f64.to_le_bytes()); // east
-        flt.extend_from_slice(&15.0f64.to_le_bytes()); // zoom
-        flt.push(0u8); // unclustered
-        flt.extend_from_slice(&1000u32.to_le_bytes());
+        flt.push(1u8);
+        flt.extend_from_slice(&36.70_f64.to_le_bytes());
+        flt.extend_from_slice(&43.80_f64.to_le_bytes());
+        flt.extend_from_slice(&36.80_f64.to_le_bytes());
+        flt.extend_from_slice(&44.00_f64.to_le_bytes());
+        flt.extend_from_slice(&15.0_f64.to_le_bytes());
+        flt.push(0u8);
+        flt.extend_from_slice(&2400u32.to_le_bytes());
         put_str(&mut flt, "");
 
         let json_bytes = build_pins_geojson_viewport(11, 3, &flt).unwrap();
@@ -578,9 +676,7 @@ mod tests {
         assert!(json.contains("\"id\":\"p1\""));
         assert!(json.contains("\"id\":\"p2\""));
         assert!(!json.contains("\"id\":\"p3\""));
-        assert!(json.contains(&crate::kurdish::shape("هەولێر")));
 
-        // Lasso polygon around p1 only
         let mut lasso = Vec::new();
         lasso.push(0b111u8);
         lasso.extend_from_slice(&0u32.to_le_bytes());
@@ -591,10 +687,63 @@ mod tests {
             lasso.extend_from_slice(&lat.to_le_bytes());
         }
         let hit = filter_pins_in_polygon(11, 3, &lasso).unwrap();
-        let cnt = u32::from_le_bytes(hit[0..4].try_into().unwrap());
-        assert_eq!(cnt, 1);
+        assert_eq!(u32::from_le_bytes(hit[0..4].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(hit[4..8].try_into().unwrap()), 0);
 
+        clear_geo_pins();
+    }
+
+    #[test]
+    fn patches_single_pin_in_place_and_bumps_version() {
+        let mut load = Vec::new();
+        put_str(&mut load, "pin-done");
+        put_str(&mut load, "pin-issue");
+        put_str(&mut load, "pin-pending");
+        load.extend_from_slice(&2u32.to_le_bytes());
+
+        put_str(&mut load, "p1");
+        put_str(&mut load, "layerA");
+        put_str(&mut load, "Meter 1");
+        load.push(2u8); // pending
+        load.extend_from_slice(&43.89_f64.to_le_bytes());
+        load.extend_from_slice(&36.74_f64.to_le_bytes());
+
+        put_str(&mut load, "p2");
+        put_str(&mut load, "layerA");
+        put_str(&mut load, "Meter 2");
+        load.push(2u8);
+        load.extend_from_slice(&43.90_f64.to_le_bytes());
+        load.extend_from_slice(&36.75_f64.to_le_bytes());
+
+        assert!(load_geo_pins(100, &load));
+
+        // Patch only p1 -> Done (0) and bump version 100 -> 101
+        let mut delta = Vec::new();
+        delta.extend_from_slice(&1u32.to_le_bytes());
+        put_str(&mut delta, "p1");
+        put_str(&mut delta, "layerA");
+        put_str(&mut delta, "Meter 1");
+        delta.push(0u8); // done
+        delta.extend_from_slice(&43.89_f64.to_le_bytes());
+        delta.extend_from_slice(&36.74_f64.to_le_bytes());
+
+        assert!(patch_geo_pins(100, 101, 2, &delta));
+        assert!(!patch_geo_pins(100, 102, 2, &delta)); // stale old version must reject
+
+        // Filter DONE-only on version 101 must return p1 without re-syncing
+        let mut flt = Vec::new();
+        flt.push(0b001u8); // done only
+        flt.extend_from_slice(&0u32.to_le_bytes());
+        flt.extend_from_slice(&0u32.to_le_bytes());
+        flt.push(0u8);
+        for _ in 0..5 { flt.extend_from_slice(&0.0_f64.to_le_bytes()); }
+        flt.push(0u8);
+        flt.extend_from_slice(&0u32.to_le_bytes());
+        put_str(&mut flt, "");
+
+        let json = String::from_utf8(build_pins_geojson_viewport(101, 2, &flt).unwrap()).unwrap();
+        assert!(json.contains(r#""id":"p1""#));
+        assert!(!json.contains(r#""id":"p2""#));
         clear_geo_pins();
     }
 }

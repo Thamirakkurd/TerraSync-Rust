@@ -218,22 +218,24 @@ object KmlCsvExporter {
                 val dir = File(appCtx.cacheDir, "exports").apply { mkdirs() }
                 cleanupOldExports(dir)
                 val file = File(dir, "${safeFileName(layer.name)}.csv")
-                val sb = StringBuilder((pinsCopy.size * 140 + 256).coerceAtMost(4 * 1024 * 1024))
-                // UTF-8 BOM ensures Excel opens Kurdish / Arabic pin names cleanly
-                sb.append('\uFEFF')
-                sb.append("Name,Status,StatusNote,Description,Latitude,Longitude,EditedBy,EditedAt\n")
-                pinsCopy.forEach { p ->
-                    val timeStr = if (p.editedAt > 0L) TimeFormatters.csvTimestamp(p.editedAt) else ""
-                    sb.append(csvEscape(p.name)).append(',')
-                        .append(csvEscape(statusLabel(p.status))).append(',')
-                        .append(csvEscape(p.issueReason)).append(',')
-                        .append(csvEscape(p.description)).append(',')
-                        .append(p.lat).append(',')
-                        .append(p.lng).append(',')
-                        .append(csvEscape(p.editedBy)).append(',')
-                        .append(csvEscape(timeStr)).append('\n')
+                if (!RustCoreBridge.exportCsvToFile(file, pinsCopy)) {
+                    val sb = StringBuilder((pinsCopy.size * 140 + 256).coerceAtMost(4 * 1024 * 1024))
+                    // UTF-8 BOM ensures Excel opens Kurdish / Arabic pin names cleanly
+                    sb.append('\uFEFF')
+                    sb.append("Name,Status,StatusNote,Description,Latitude,Longitude,EditedBy,EditedAt\n")
+                    pinsCopy.forEach { p ->
+                        val timeStr = if (p.editedAt > 0L) TimeFormatters.csvTimestamp(p.editedAt) else ""
+                        sb.append(csvEscape(p.name)).append(',')
+                            .append(csvEscape(statusLabel(p.status))).append(',')
+                            .append(csvEscape(p.issueReason)).append(',')
+                            .append(csvEscape(p.description)).append(',')
+                            .append(p.lat).append(',')
+                            .append(p.lng).append(',')
+                            .append(csvEscape(p.editedBy)).append(',')
+                            .append(csvEscape(timeStr)).append('\n')
+                    }
+                                    file.writeText(sb.toString(), Charsets.UTF_8)
                 }
-                file.writeText(sb.toString(), Charsets.UTF_8)
                 file
             }
             mainHandler.post {

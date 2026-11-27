@@ -187,6 +187,166 @@ mod tests {
     }
 
     #[test]
+    fn bench_wave8_report_20k() {
+        let put_s = |b: &mut Vec<u8>, s: &str| {
+            b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            b.extend_from_slice(s.as_bytes());
+        };
+        let mut dedup_in = Vec::with_capacity(20_000 * 64);
+        dedup_in.extend_from_slice(&20_000u32.to_le_bytes());
+        let mut rep_in = Vec::with_capacity(20_000 * 80);
+        put_s(&mut rep_in, "Akre & Kurdistan Stress");
+        put_s(&mut rep_in, "27 Nov 2026");
+        put_s(&mut rep_in, "Local");
+        rep_in.extend_from_slice(&0u32.to_le_bytes());
+        put_s(&mut rep_in, "");
+        rep_in.extend_from_slice(&0u32.to_le_bytes());
+        rep_in.extend_from_slice(&0u32.to_le_bytes());
+        rep_in.extend_from_slice(&20_000u32.to_le_bytes());
+
+        for i in 0..20_000usize {
+            let id = format!("id-{i}");
+            let name = format!("MTR-{i:05} ئاکرێ Pole");
+            let lat = 36.70 + (i % 200) as f64 * 0.0005;
+            let lng = 43.85 + (i / 200) as f64 * 0.0005;
+            let st = (i % 3) as u8;
+            put_s(&mut dedup_in, &id);
+            put_s(&mut dedup_in, &name);
+            dedup_in.extend_from_slice(&lat.to_le_bytes());
+            dedup_in.extend_from_slice(&lng.to_le_bytes());
+            dedup_in.push(st);
+            dedup_in.push(if st != 2 { 1 } else { 0 });
+            dedup_in.extend_from_slice(&(i as i64).to_le_bytes());
+            dedup_in.extend_from_slice(&(i as i64).to_le_bytes());
+
+            put_s(&mut rep_in, &name);
+            rep_in.push(st);
+            put_s(&mut rep_in, if st == 0 { "Meter Linked" } else if st == 1 { "Need Electricity" } else { "" });
+            rep_in.push(if st != 2 { 1 } else { 0 });
+            put_s(&mut rep_in, if st != 2 { "Team 1 (#A1B2)" } else { "" });
+            put_s(&mut rep_in, "");
+        }
+
+        let t0 = Instant::now();
+        let kept = crate::report::deduplicate_pins_indices(&dedup_in).unwrap();
+        let dedup_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let t1 = Instant::now();
+        let rep = crate::report::build_daily_report(&rep_in).unwrap();
+        let report_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        println!(
+            "WAVE8_20K_BENCH | dedup_20k={:.2} ms ({} kept) | daily_report_20k={:.2} ms ({} bytes)",
+            dedup_ms,
+            u32::from_le_bytes(kept[0..4].try_into().unwrap()),
+            report_ms,
+            rep.len()
+        );
+    }
+
+    #[test]
+    fn bench_wave9_ops() {
+        let put_s = |b: &mut Vec<u8>, s: &str| {
+            b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            b.extend_from_slice(s.as_bytes());
+        };
+
+        // 1. 5,000-vertex route load + 1,000 live GPS ticks
+        let mut flat = Vec::with_capacity(10_000);
+        for i in 0..5_000usize {
+            flat.push(43.0 + i as f64 * 0.0002);
+            flat.push(36.7 + (i % 7) as f64 * 0.00003);
+        }
+        assert!(crate::nav_geo::load_nav_route(999, &flat));
+        let t0 = Instant::now();
+        let mut seg = 0i32;
+        for tick in 0..1_000usize {
+            let idx = tick * 4;
+            let res = crate::nav_geo::track_nav_route(999, 5_000, flat[idx * 2 + 1], flat[idx * 2], seg).unwrap();
+            seg = i32::from_le_bytes(res[0..4].try_into().unwrap());
+        }
+        let nav_1k_ticks_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // 2. 20,000-pin streaming CSV export
+        let mut csv_in = Vec::with_capacity(20_000 * 96);
+        csv_in.extend_from_slice(&20_000u32.to_le_bytes());
+        for i in 0..20_000usize {
+            put_s(&mut csv_in, &format!("MTR-{i:05} ئاکرێ"));
+            put_s(&mut csv_in, "Done");
+            put_s(&mut csv_in, "Meter Linked");
+            put_s(&mut csv_in, "Feeder 01");
+            csv_in.extend_from_slice(&(36.74_f64 + (i % 100) as f64 * 0.0001).to_le_bytes());
+            csv_in.extend_from_slice(&(43.89_f64 + (i / 100) as f64 * 0.0001).to_le_bytes());
+            put_s(&mut csv_in, "Team 1");
+            put_s(&mut csv_in, "2026-11-27 14:30");
+        }
+        let csv_path = std::env::temp_dir().join("terrasync_bench_20k.csv");
+        let t1 = Instant::now();
+        assert!(crate::csv_export::export_csv_file(&csv_in, csv_path.to_str().unwrap()));
+        let csv_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        let _ = std::fs::remove_file(&csv_path);
+
+        // 3. 20,000-pin working-hours audit
+        let mut aud_in = Vec::with_capacity(20_000 * 64);
+        aud_in.extend_from_slice(&(8 * 60i32).to_le_bytes());
+        aud_in.extend_from_slice(&(17 * 60i32).to_le_bytes());
+        aud_in.extend_from_slice(&(3 * 3600 * 1000i64).to_le_bytes());
+        aud_in.extend_from_slice(&20_000u32.to_le_bytes());
+        for i in 0..20_000usize {
+            put_s(&mut aud_in, if i % 4 == 0 { "27 Nov 19:45 • Team 1 → Done" } else { "27 Nov 11:20 • Team 1 → Done" });
+            aud_in.push(1u8);
+            aud_in.extend_from_slice(&0i64.to_le_bytes());
+            aud_in.extend_from_slice(&0i64.to_le_bytes());
+        }
+        let t2 = Instant::now();
+        let late = crate::audit::count_outside_working_hours(&aud_in).unwrap();
+        let audit_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+        println!(
+            "WAVE9_BENCH | nav_1k_ticks_5k_route={:.2} ms | csv_export_20k={:.2} ms | audit_20k={:.2} ms (late={})",
+            nav_1k_ticks_ms, csv_ms, audit_ms, late
+        );
+    }
+
+    #[test]
+    fn bench_delta_patch_20k() {
+        let put_s = |b: &mut Vec<u8>, s: &str| {
+            b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            b.extend_from_slice(s.as_bytes());
+        };
+        let mut load = Vec::with_capacity(20_000 * 64);
+        put_s(&mut load, "pin-done");
+        put_s(&mut load, "pin-issue");
+        put_s(&mut load, "pin-pending");
+        load.extend_from_slice(&20_000u32.to_le_bytes());
+        for i in 0..20_000usize {
+            put_s(&mut load, &format!("id-{i}"));
+            put_s(&mut load, "layer1");
+            put_s(&mut load, &format!("MTR-{i:05} ئاکرێ"));
+            load.push((i % 3) as u8);
+            load.extend_from_slice(&(43.85 + (i / 200) as f64 * 0.001).to_le_bytes());
+            load.extend_from_slice(&(36.70 + (i % 200) as f64 * 0.001).to_le_bytes());
+        }
+        assert!(crate::geojson::load_geo_pins(500, &load));
+
+        let mut delta = Vec::new();
+        delta.extend_from_slice(&1u32.to_le_bytes());
+        put_s(&mut delta, "id-12345");
+        put_s(&mut delta, "layer1");
+        put_s(&mut delta, "MTR-12345 ئاکرێ");
+        delta.push(0u8);
+        delta.extend_from_slice(&43.91_f64.to_le_bytes());
+        delta.extend_from_slice(&36.74_f64.to_le_bytes());
+
+        let t0 = Instant::now();
+        assert!(crate::geojson::patch_geo_pins(500, 501, 20_000, &delta));
+        let delta_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        crate::geojson::clear_geo_pins();
+
+        println!("DELTA_20K_BENCH | single_pin_patch_in_20k={:.1} us", delta_us);
+    }
+
+    #[test]
     fn bench_native_engines() {
         // 1. KML parse + export benchmark (500 field pins)
         let mut kml = String::from(

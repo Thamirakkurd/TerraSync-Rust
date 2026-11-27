@@ -231,10 +231,38 @@ class ContourOverlayManager {
         val mySeq = seq.incrementAndGet()
         contourExecutor.execute {
             if (seq.get() != mySeq) return@execute
-            val features = ArrayList<Feature>(256)
+            val grids = ArrayList<TileGrid>(selectedTiles.size)
             for ((z, x, y) in selectedTiles) {
                 if (seq.get() != mySeq) return@execute
-                val grid = fetchOrCachedGrid(z, x, y) ?: continue
+                fetchOrCachedGrid(z, x, y)?.let { grids.add(it) }
+            }
+            if (seq.get() != mySeq) return@execute
+            val nativeJson = if (grids.isNotEmpty()) {
+                RustCoreBridge.buildContoursGeoJsonBatch(
+                    zs = IntArray(grids.size) { grids[it].z },
+                    xs = IntArray(grids.size) { grids[it].x },
+                    ys = IntArray(grids.size) { grids[it].y },
+                    ns = IntArray(grids.size) { grids[it].n },
+                    elevs = Array(grids.size) { grids[it].elev },
+                    step = stepMeters,
+                    majorStep = majorStep
+                )
+            } else "{\"type\":\"FeatureCollection\",\"features\":[]}"
+            if (nativeJson != null) {
+                mainHandler.post {
+                    if (seq.get() != mySeq) return@post
+                    runCatching {
+                        val curStyle = map.style ?: return@runCatching
+                        if (!curStyle.isFullyLoaded) return@runCatching
+                        lastViewportKey = vpKey
+                        curStyle.getSourceAs<GeoJsonSource>(CONTOURS_SOURCE)?.setGeoJson(nativeJson)
+                    }
+                }
+                return@execute
+            }
+            val features = ArrayList<Feature>(256)
+            for (grid in grids) {
+                if (seq.get() != mySeq) return@execute
                 extractContoursForGrid(grid, stepMeters, majorStep, features)
             }
             if (seq.get() != mySeq) return@execute
@@ -318,17 +346,18 @@ class ContourOverlayManager {
             val pixels = IntArray(w * h)
             bmp.getPixels(pixels, 0, w, 0, 0, w, h)
             val n = GRID_N
-            val elev = FloatArray((n + 1) * (n + 1))
-            for (gy in 0..n) {
-                val py = ((gy * (h - 1)) / n).coerceIn(0, h - 1)
-                val rowOff = py * w
-                for (gx in 0..n) {
-                    val px = ((gx * (w - 1)) / n).coerceIn(0, w - 1)
-                    val pixel = pixels[rowOff + px]
-                    val r = (pixel shr 16) and 0xFF
-                    val g = (pixel shr 8) and 0xFF
-                    val b = pixel and 0xFF
-                    elev[gy * (n + 1) + gx] = (r * 256f + g + b / 256f) - 32768f
+            val elev = RustCoreBridge.decodeTerrariumGrid(pixels, w, h, n) ?: FloatArray((n + 1) * (n + 1)).also { arr ->
+                for (gy in 0..n) {
+                    val py = ((gy * (h - 1)) / n).coerceIn(0, h - 1)
+                    val rowOff = py * w
+                    for (gx in 0..n) {
+                        val px = ((gx * (w - 1)) / n).coerceIn(0, w - 1)
+                        val pixel = pixels[rowOff + px]
+                        val r = (pixel shr 16) and 0xFF
+                        val g = (pixel shr 8) and 0xFF
+                        val b = pixel and 0xFF
+                        arr[gy * (n + 1) + gx] = (r * 256f + g + b / 256f) - 32768f
+                    }
                 }
             }
             TileGrid(z, x, y, n, elev).also { grid ->

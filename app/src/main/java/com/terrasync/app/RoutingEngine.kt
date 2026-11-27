@@ -304,6 +304,7 @@ object RoutingEngine {
     }
 
     private fun decodePolyline6(encoded: String): List<Pair<Double, Double>> {
+        RustCoreBridge.decodePolyline6(encoded)?.let { return it }
         val poly = ArrayList<Pair<Double, Double>>()
         var index = 0
         val len = encoded.length
@@ -615,6 +616,7 @@ object RoutingEngine {
         route: NavRoute,
         lastSegIdx: Int = 0
     ): RouteProgress {
+        RustCoreBridge.trackRouteProgress(lat, lng, route, lastSegIdx)?.let { return it }
         val (segLens, cumLens) = route.segmentMetrics
         return trackRouteProgressInternal(lat, lng, route.geometry, segLens, cumLens, lastSegIdx)
     }

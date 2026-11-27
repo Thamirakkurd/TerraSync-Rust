@@ -1,5 +1,5 @@
-use jni::objects::{JByteArray, JClass, JFloatArray, JString};
-use jni::sys::{jboolean, jbyteArray, jdouble, jint, jlong};
+use jni::objects::{JByteArray, JClass, JDoubleArray, JFloatArray, JIntArray, JString};
+use jni::sys::{jboolean, jbyteArray, jdouble, jfloatArray, jint, jlong, jsize};
 use jni::JNIEnv;
 
 #[no_mangle]
@@ -367,3 +367,197 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeSortAndScoreP
     }));
     match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeFindExactStackedPins<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    expected_len: jint,
+    payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        if expected_len < 0 { return None; }
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let out = crate::geojson::find_exact_stacked_pins(version, expected_len as usize, &bytes)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeDeduplicatePins<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let out = crate::report::deduplicate_pins_indices(&bytes)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeFindDuplicateExtraIds<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let out = crate::report::find_duplicate_extra_indices(&bytes)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeBuildDailyReport<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let out = crate::report::build_daily_report(&bytes)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeDecodePolyline6<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    encoded: JString<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let s: String = env.get_string(&encoded).ok()?.into();
+        let out = crate::nav_geo::decode_polyline6_wire(&s);
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLoadNavRoute<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    route_id: jlong,
+    coords_lng_lat: JDoubleArray<'local>,
+) -> jboolean {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let len = env.get_array_length(&coords_lng_lat).ok()? as usize;
+        let mut buf = vec![0.0f64; len];
+        env.get_double_array_region(&coords_lng_lat, 0, &mut buf).ok()?;
+        Some(crate::nav_geo::load_nav_route(route_id, &buf))
+    }));
+    match result { Ok(Some(true)) => 1, _ => 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeTrackNavRoute<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    route_id: jlong,
+    expected_len: jint,
+    lat: jdouble,
+    lng: jdouble,
+    last_seg_idx: jint,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        if expected_len < 2 { return None; }
+        let out = crate::nav_geo::track_nav_route(route_id, expected_len as usize, lat, lng, last_seg_idx)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeExportCsvFile<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+    out_path: JString<'local>,
+) -> jboolean {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let path_str: String = env.get_string(&out_path).ok()?.into();
+        Some(crate::csv_export::export_csv_file(&bytes, &path_str))
+    }));
+    match result { Ok(Some(true)) => 1, _ => 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeDecodeTerrariumGrid<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    pixels: JIntArray<'local>,
+    w: jint,
+    h: jint,
+    n: jint,
+) -> jfloatArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        if w <= 0 || h <= 0 || n <= 0 { return None; }
+        let len = env.get_array_length(&pixels).ok()? as usize;
+        let mut buf = vec![0i32; len];
+        env.get_int_array_region(&pixels, 0, &mut buf).ok()?;
+        let elev = crate::contour_geo::decode_terrarium_grid(&buf, w as usize, h as usize, n as usize)?;
+        let out_arr = env.new_float_array(elev.len() as jsize).ok()?;
+        env.set_float_array_region(&out_arr, 0, &elev).ok()?;
+        Some(out_arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeBuildContoursGeoJsonBatch<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let json = crate::contour_geo::build_contours_geojson_batch(&bytes)?;
+        env.byte_array_from_slice(&json).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeCountOutsideWorkingHours<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+) -> jint {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        crate::audit::count_outside_working_hours(&bytes)
+    }));
+    match result { Ok(Some(v)) => v, _ => -1 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativePatchGeoPins<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    old_version: jlong,
+    new_version: jlong,
+    expected_len: jint,
+    payload: JByteArray<'local>,
+) -> jboolean {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        if expected_len < 0 { return None; }
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        Some(crate::geojson::patch_geo_pins(
+            old_version,
+            new_version,
+            expected_len as usize,
+            &bytes,
+        ))
+    }));
+    match result { Ok(Some(true)) => 1, _ => 0 }
+}
+

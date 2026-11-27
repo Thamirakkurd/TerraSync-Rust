@@ -41,11 +41,16 @@ internal fun buildFolderIndexSnapshot(
     val pById = mergedPins.associateBy { it.id }
     val pByLayer = mergedPins.groupBy { it.layerId }
     val tByLayer = mergedTracks.groupBy { it.layerId }
-    val buckets = HashMap<Long, MutableList<PinItem>>(mergedPins.size)
-    for (pItem in mergedPins) {
-        val bx = floor(pItem.lat / cellSize).toInt()
-        val by = floor(pItem.lng / cellSize).toInt()
-        buckets.getOrPut(stackedBucketKey(bx, by)) { ArrayList(2) }.add(pItem)
+    val buckets: Map<Long, List<PinItem>> = if (RustCoreBridge.isAvailable() && mergedPins.size > 500) {
+        emptyMap()
+    } else {
+        HashMap<Long, MutableList<PinItem>>(mergedPins.size).also { map ->
+            for (pItem in mergedPins) {
+                val bx = floor(pItem.lat / cellSize).toInt()
+                val by = floor(pItem.lng / cellSize).toInt()
+                map.getOrPut(stackedBucketKey(bx, by)) { ArrayList(2) }.add(pItem)
+            }
+        }
     }
     return FolderIndexSnapshot(
         layers = sortedLayers,
@@ -69,6 +74,15 @@ internal fun findExactStackedPinsFromSnapshot(
     sentIds: Set<String>,
     cellSize: Double = STACKED_CELL_SIZE
 ): List<PinItem> {
+    RustCoreBridge.findExactStackedPins(
+        version = snapshot.dataVersion,
+        pins = snapshot.pins,
+        targetPin = pin,
+        hiddenLayerIds = hiddenLayerIds,
+        visibleStatuses = visibleStatuses,
+        sentIds = sentIds,
+        cellSize = cellSize
+    )?.let { return it }
     val cx = floor(pin.lat / cellSize).toInt()
     val cy = floor(pin.lng / cellSize).toInt()
     val stack = ArrayList<PinItem>(4)
@@ -109,6 +123,8 @@ class TerraSyncRepository(
     private val pendingCallbacksLock = Any()
     private val pendingIndexedCallbacks = mutableListOf<(FolderIndexSnapshot) -> Unit>()
     private var isPreloadingLocal = false
+    private val pendingGeoDeltaPins = LinkedHashMap<String, PinItem>()
+    private var pendingGeoDeltaInvalidated = false
 
     @Volatile private var cloudLayers: List<LayerItem> = emptyList()
     @Volatile private var cloudPins: List<PinItem> = emptyList()
@@ -128,10 +144,21 @@ class TerraSyncRepository(
         snapshotListeners.remove(listener)
     }
 
-    fun applyMergedFolders(onIndexed: ((FolderIndexSnapshot) -> Unit)? = null) {
-        if (onIndexed != null) {
-            synchronized(pendingCallbacksLock) {
+    fun applyMergedFolders(
+        onIndexed: ((FolderIndexSnapshot) -> Unit)? = null,
+        deltaUpdatedPins: List<PinItem>? = null
+    ) {
+        synchronized(pendingCallbacksLock) {
+            if (onIndexed != null) {
                 pendingIndexedCallbacks.add(onIndexed)
+            }
+            if (deltaUpdatedPins != null) {
+                if (!pendingGeoDeltaInvalidated) {
+                    for (p in deltaUpdatedPins) pendingGeoDeltaPins[p.id] = p
+                }
+            } else {
+                pendingGeoDeltaInvalidated = true
+                pendingGeoDeltaPins.clear()
             }
         }
         val cachedLocal = LocalFolderStore.getCachedOrNull()
@@ -173,7 +200,21 @@ class TerraSyncRepository(
         val connectedSnap = liveConnected
 
         fun commitSnapshot(built: FolderIndexSnapshot) {
+            val prevSnap = snapshot
+            val deltaBatch: List<PinItem> = synchronized(pendingCallbacksLock) {
+                val out = if (!pendingGeoDeltaInvalidated && pendingGeoDeltaPins.isNotEmpty()) {
+                    pendingGeoDeltaPins.values.toList()
+                } else {
+                    emptyList()
+                }
+                pendingGeoDeltaPins.clear()
+                pendingGeoDeltaInvalidated = false
+                out
+            }
             snapshot = built
+            if (deltaBatch.isNotEmpty() && built.pins.size == prevSnap.pins.size) {
+                RustCoreBridge.patchGeoPins(prevSnap.dataVersion, built.dataVersion, built.pins.size, deltaBatch)
+            }
             val joinedEmpty = DevicePrefs.getJoinedLayerIds(appContext).isEmpty()
             if (built.layers.isNotEmpty() || connectedSnap || joinedEmpty) {
                 DevicePrefs.saveCachedLayerNames(appContext, built.layers.map { it.name })
@@ -282,7 +323,7 @@ class TerraSyncRepository(
         if (cloudPins.any { it.id == updated.id }) {
             cloudPins = cloudPins.map { if (it.id == updated.id) updated else it }
         }
-        applyMergedFolders()
+        applyMergedFolders(deltaUpdatedPins = listOf(updated))
     }
 
     fun savePinStatus(
@@ -293,8 +334,8 @@ class TerraSyncRepository(
         onError: ((String) -> Unit)? = null
     ) {
         if (LocalFolderStore.isLocalLayerId(pin.layerId)) {
-            LocalFolderStore.updatePinStatus(appContext, pin, status, stamp, reason)
-            applyMergedFolders()
+            val updated = LocalFolderStore.updatePinStatus(appContext, pin, status, stamp, reason)
+            applyMergedFolders(deltaUpdatedPins = listOf(updated))
         } else {
             val updated = syncRepo.updatePinStatus(pin, status, stamp, reason, onError)
             applyOptimisticCloudPinUpdate(updated)
@@ -311,15 +352,17 @@ class TerraSyncRepository(
         if (targetPins.isEmpty()) return
         val localPins = targetPins.filter { LocalFolderStore.isLocalLayerId(it.layerId) }
         val remotePins = targetPins.filterNot { LocalFolderStore.isLocalLayerId(it.layerId) }
+        val updatedDelta = ArrayList<PinItem>(targetPins.size)
         if (localPins.isNotEmpty()) {
-            LocalFolderStore.updatePinsStatusBatch(appContext, localPins, status, stamp, reason)
+            updatedDelta.addAll(LocalFolderStore.updatePinsStatusBatch(appContext, localPins, status, stamp, reason))
         }
         if (remotePins.isNotEmpty()) {
             val updatedCloud = syncRepo.updatePinsStatusBatch(remotePins, status, stamp, reason, onError)
+            updatedDelta.addAll(updatedCloud)
             val byId = updatedCloud.associateBy { it.id }
             cloudPins = cloudPins.map { byId[it.id] ?: it }
         }
-        applyMergedFolders()
+        applyMergedFolders(deltaUpdatedPins = updatedDelta)
     }
 
     fun savePinText(
@@ -330,8 +373,8 @@ class TerraSyncRepository(
         onError: ((String) -> Unit)? = null
     ) {
         if (LocalFolderStore.isLocalLayerId(pin.layerId)) {
-            LocalFolderStore.updatePinText(appContext, pin, newName, newDesc, stamp)
-            applyMergedFolders()
+            val updated = LocalFolderStore.updatePinText(appContext, pin, newName, newDesc, stamp)
+            applyMergedFolders(deltaUpdatedPins = listOf(updated))
         } else {
             val updated = syncRepo.updatePinText(pin, newName, newDesc, stamp, onError)
             applyOptimisticCloudPinUpdate(updated)
@@ -345,7 +388,7 @@ class TerraSyncRepository(
     ): PinItem {
         return if (LocalFolderStore.isLocalLayerId(pin.layerId)) {
             val updated = LocalFolderStore.deletePinHistoryEntry(appContext, pin, idx)
-            applyMergedFolders()
+            applyMergedFolders(deltaUpdatedPins = listOf(updated))
             updated
         } else {
             val updated = syncRepo.deletePinHistoryEntry(pin, idx, onError)
@@ -359,8 +402,8 @@ class TerraSyncRepository(
         onError: ((String) -> Unit)? = null
     ) {
         if (LocalFolderStore.isLocalLayerId(previousPin.layerId)) {
-            LocalFolderStore.restorePinStatusSnapshot(appContext, previousPin)
-            applyMergedFolders()
+            val restored = LocalFolderStore.restorePinStatusSnapshot(appContext, previousPin)
+            applyMergedFolders(deltaUpdatedPins = listOf(restored))
         } else {
             val restored = syncRepo.restorePinStatusSnapshot(previousPin, onError)
             applyOptimisticCloudPinUpdate(restored)
@@ -373,7 +416,7 @@ class TerraSyncRepository(
     ): PinItem {
         return if (LocalFolderStore.isLocalLayerId(pin.layerId)) {
             val updated = LocalFolderStore.resetPinStatusToPending(appContext, pin)
-            applyMergedFolders()
+            applyMergedFolders(deltaUpdatedPins = listOf(updated))
             updated
         } else {
             val updated = syncRepo.resetPinStatusToPending(pin, onError)

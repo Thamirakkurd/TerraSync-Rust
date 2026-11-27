@@ -176,7 +176,7 @@ class MapLayerRenderer(
             bounds.latitudeNorth <= lastVpNorth &&
             bounds.longitudeWest >= lastVpWest &&
             bounds.longitudeEast <= lastVpEast &&
-            kotlin.math.abs(zoom - lastVpZoom) < 0.70
+            kotlin.math.abs(zoom - lastVpZoom) < 0.55
         ) {
             return
         }
@@ -725,10 +725,10 @@ class MapLayerRenderer(
             if (bounds != null) {
                 val latSpan = (bounds.latitudeNorth - bounds.latitudeSouth).coerceAtLeast(0.002)
                 val lngSpan = (bounds.longitudeEast - bounds.longitudeWest).coerceAtLeast(0.002)
-                vpS = (bounds.latitudeSouth - latSpan * 0.65).coerceAtLeast(-90.0)
-                vpN = (bounds.latitudeNorth + latSpan * 0.65).coerceAtMost(90.0)
-                vpW = (bounds.longitudeWest - lngSpan * 0.65).coerceAtLeast(-180.0)
-                vpE = (bounds.longitudeEast + lngSpan * 0.65).coerceAtMost(180.0)
+                vpS = (bounds.latitudeSouth - latSpan * 0.35).coerceAtLeast(-90.0)
+                vpN = (bounds.latitudeNorth + latSpan * 0.35).coerceAtMost(90.0)
+                vpW = (bounds.longitudeWest - lngSpan * 0.35).coerceAtLeast(-180.0)
+                vpE = (bounds.longitudeEast + lngSpan * 0.35).coerceAtMost(180.0)
                 validVp = vpN > vpS && vpE > vpW
             }
         }
@@ -763,7 +763,7 @@ class MapLayerRenderer(
                     east = capE,
                     zoom = capZoom,
                     clustered = clustered,
-                    maxUnclusteredPins = 1100,
+                    maxUnclusteredPins = 2400,
                     selectedPinId = selPinId
                 )
                 if (nativePinsJson != null) {
