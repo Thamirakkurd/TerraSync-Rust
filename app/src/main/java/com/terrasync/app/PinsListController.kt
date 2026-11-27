@@ -186,6 +186,7 @@ class PinsListController(
         }
 
         fun analyzeSameCoordClusters(list: List<PinItem>): Pair<Set<String>, Map<String, Int>> {
+            RustCoreBridge.analyzeSameCoordClusters(list)?.let { return it }
             val cellSize = STACKED_CELL_SIZE
             val buckets = HashMap<Long, MutableList<Int>>()
             list.forEachIndexed { idx, pin ->
@@ -770,7 +771,18 @@ class PinsListController(
                 val useNearest = curSortNearest && loc != null
                 val sortedPins: List<PinItem>
                 val distLabelById: Map<String, String>
-                if (loc != null) {
+                val nativeSorted = RustCoreBridge.sortAndScorePins(
+                    pins = filtered,
+                    selectionMode = curSelectionMode,
+                    selectedIds = curSelectedSnap,
+                    loc = loc,
+                    useNearest = useNearest,
+                    unit = unit
+                )
+                if (nativeSorted != null) {
+                    sortedPins = nativeSorted.first
+                    distLabelById = nativeSorted.second
+                } else if (loc != null) {
                     val uLat = loc.latitude
                     val uLng = loc.longitude
                     val scored = ArrayList<Pair<PinItem, Double>>(filtered.size)

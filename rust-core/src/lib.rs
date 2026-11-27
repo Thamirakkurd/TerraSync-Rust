@@ -5,4 +5,8 @@ pub mod kurdish;
 pub mod mvt;
 pub mod pmtiles;
 pub mod contour;
+pub mod bench;
+pub mod search;
+pub mod geojson;
+pub mod pins_ops;
 pub mod jni_bridge;

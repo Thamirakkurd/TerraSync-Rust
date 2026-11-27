@@ -144,6 +144,46 @@ class MapLayerRenderer(
     @Volatile private var styleLoadSeq: Long = 0L
     private val trackPointCache = HashMap<String, Pair<Long, List<Point>>>()
     private var pulseAnimator: ValueAnimator? = null
+    private var cameraIdleMap: MapLibreMap? = null
+    private var hasViewportCull: Boolean = false
+    private var lastVpSouth: Double = -90.0
+    private var lastVpNorth: Double = 90.0
+    private var lastVpWest: Double = -180.0
+    private var lastVpEast: Double = 180.0
+    private var lastVpZoom: Double = 0.0
+    private val viewportIdleListener = MapLibreMap.OnCameraIdleListener {
+        onMapCameraIdleForViewport()
+    }
+
+    private fun ensureCameraIdleListener(m: MapLibreMap) {
+        if (cameraIdleMap === m) return
+        cameraIdleMap?.removeOnCameraIdleListener(viewportIdleListener)
+        cameraIdleMap = m
+        m.addOnCameraIdleListener(viewportIdleListener)
+    }
+
+    private fun onMapCameraIdleForViewport() {
+        if (!isActivityAlive() || !RustCoreBridge.isAvailable()) return
+        val snap = viewModel.folderSnapshot
+        if (snap.pins.size <= 1500) return
+        val m = map ?: return
+        val style = m.style ?: return
+        if (!style.isFullyLoaded) return
+        val bounds = runCatching { m.projection.visibleRegion.latLngBounds }.getOrNull() ?: return
+        val zoom = m.cameraPosition.zoom
+        if (hasViewportCull &&
+            bounds.latitudeSouth >= lastVpSouth &&
+            bounds.latitudeNorth <= lastVpNorth &&
+            bounds.longitudeWest >= lastVpWest &&
+            bounds.longitudeEast <= lastVpEast &&
+            kotlin.math.abs(zoom - lastVpZoom) < 0.70
+        ) {
+            return
+        }
+        lastPinsRenderKey = null
+        lastTracksRenderKey = null
+        renderPinsAndTracks(style)
+    }
 
     fun retainTrackPointCache(activeTrackIds: Set<String>) {
         synchronized(trackPointCache) {
@@ -164,6 +204,7 @@ class MapLayerRenderer(
         pulseAnimator = null
         synchronized(trackPointCache) {
             trackPointCache.clear()
+            RustCoreBridge.clearGeoPinsCache()
         }
         map = null
     }
@@ -195,6 +236,7 @@ class MapLayerRenderer(
 
     private fun applyMapStyleBuilder(m: MapLibreMap, builder: Style.Builder, night: Boolean, seq: Long) {
         if (!isActivityAlive() || seq != styleLoadSeq || map !== m) return
+        ensureCameraIdleListener(m)
         m.setStyle(builder) { style ->
             if (!isActivityAlive() || seq != styleLoadSeq || map !== m) return@setStyle
             lastRoutePillKey = null
@@ -522,8 +564,9 @@ class MapLayerRenderer(
                 FeatureCollection.fromFeatures(emptyList<Feature>()),
                 GeoJsonOptions()
                     .withCluster(true)
-                    .withClusterMaxZoom(13)
-                    .withClusterRadius(46)
+                    .withClusterMaxZoom(15)
+                .withClusterRadius(48)
+                .withTolerance(0.5f)
             )
         )
 
@@ -658,6 +701,8 @@ class MapLayerRenderer(
     }
 
     private fun renderPinsAndTracks(style: Style) {
+        val curMap = map
+        if (curMap != null) ensureCameraIdleListener(curMap)
         val snap = viewModel.folderSnapshot
         val hiddenLayerIds = DevicePrefs.getHiddenLayerIds(context)
         val sentIds = if (viewModel.hideSentPins) DevicePrefs.getLocalSentPinIds(context) else emptySet()
@@ -667,16 +712,80 @@ class MapLayerRenderer(
 
         applyPinClusterModeVisibility(style, clustered, showTitles)
 
+        val useViewport = RustCoreBridge.isAvailable() && snap.pins.size > 1500
+        var vpS = -90.0
+        var vpW = -180.0
+        var vpN = 90.0
+        var vpE = 180.0
+        var vpZoom = 14.0
+        var validVp = false
+        if (useViewport && curMap != null) {
+            val bounds = runCatching { curMap.projection.visibleRegion.latLngBounds }.getOrNull()
+            vpZoom = curMap.cameraPosition.zoom
+            if (bounds != null) {
+                val latSpan = (bounds.latitudeNorth - bounds.latitudeSouth).coerceAtLeast(0.002)
+                val lngSpan = (bounds.longitudeEast - bounds.longitudeWest).coerceAtLeast(0.002)
+                vpS = (bounds.latitudeSouth - latSpan * 0.65).coerceAtLeast(-90.0)
+                vpN = (bounds.latitudeNorth + latSpan * 0.65).coerceAtMost(90.0)
+                vpW = (bounds.longitudeWest - lngSpan * 0.65).coerceAtLeast(-180.0)
+                vpE = (bounds.longitudeEast + lngSpan * 0.65).coerceAtMost(180.0)
+                validVp = vpN > vpS && vpE > vpW
+            }
+        }
+        hasViewportCull = validVp
+        if (validVp) {
+            lastVpSouth = vpS
+            lastVpNorth = vpN
+            lastVpWest = vpW
+            lastVpEast = vpE
+            lastVpZoom = vpZoom
+        }
+
         val pinsKey = "${snap.dataVersion}|$clustered|${statusesSnap.hashCode()}|${statusesSnap.size}|${hiddenLayerIds.hashCode()}|${hiddenLayerIds.size}|${viewModel.hideSentPins}|${sentIds.hashCode()}|${sentIds.size}"
         if (pinsKey != lastPinsRenderKey) {
             lastPinsRenderKey = pinsKey
             val seq = ++pinRenderSeq
             val pinsSnap = snap.pins
+            val selPinId = viewModel.selectedPinId
+            val capS = vpS; val capW = vpW; val capN = vpN; val capE = vpE
+            val capZoom = vpZoom; val capUseVp = validVp
             AppExecutors.batchIoExecutor.execute {
+                val nativePinsJson = RustCoreBridge.buildPinsGeoJsonViewport(
+                    version = snap.dataVersion,
+                    pins = pinsSnap,
+                    hiddenLayerIds = hiddenLayerIds,
+                    sentIds = sentIds,
+                    visibleStatuses = statusesSnap,
+                    useViewport = capUseVp,
+                    south = capS,
+                    west = capW,
+                    north = capN,
+                    east = capE,
+                    zoom = capZoom,
+                    clustered = clustered,
+                    maxUnclusteredPins = 1100,
+                    selectedPinId = selPinId
+                )
+                if (nativePinsJson != null) {
+                    val emptyJson = "{\"type\":\"FeatureCollection\",\"features\":[]}"
+                    AppExecutors.postMain {
+                        if (isActivityAlive() && seq == pinRenderSeq && map?.style === style && style.isFullyLoaded) {
+                            applyPinClusterModeVisibility(style, clustered, showTitles)
+                            if (clustered) {
+                                style.getSourceAs<GeoJsonSource>(PINS_CLUSTER_SOURCE)?.setGeoJson(nativePinsJson)
+                                style.getSourceAs<GeoJsonSource>(PINS_SOURCE)?.setGeoJson(emptyJson)
+                            } else {
+                                style.getSourceAs<GeoJsonSource>(PINS_SOURCE)?.setGeoJson(nativePinsJson)
+                                style.getSourceAs<GeoJsonSource>(PINS_CLUSTER_SOURCE)?.setGeoJson(emptyJson)
+                            }
+                        }
+                    }
+                    return@execute
+                }
+
                 val doneFeatures = ArrayList<Feature>(pinsSnap.size / 2)
                 val issueFeatures = ArrayList<Feature>(pinsSnap.size / 4)
                 val pendingFeatures = ArrayList<Feature>(pinsSnap.size / 4)
-
                 fun toPinFeature(pin: PinItem, st: PinStatus): Feature {
                     val trimmed = pin.name.trim()
                     val shortLabel = if (trimmed.length > 22) trimmed.take(21).trimEnd() + "…" else trimmed
@@ -687,7 +796,6 @@ class MapLayerRenderer(
                         addStringProperty("icon", st.iconId)
                     }
                 }
-
                 for (pin in pinsSnap) {
                     if (pin.layerId in hiddenLayerIds || pin.id in sentIds) continue
                     val st = PinStatus.fromRaw(pin.status)
@@ -699,10 +807,7 @@ class MapLayerRenderer(
                         PinStatus.PENDING -> pendingFeatures.add(f)
                     }
                 }
-
-                val pinFeatures = ArrayList<Feature>(
-                    doneFeatures.size + issueFeatures.size + pendingFeatures.size
-                )
+                val pinFeatures = ArrayList<Feature>(doneFeatures.size + issueFeatures.size + pendingFeatures.size)
                 pinFeatures.addAll(doneFeatures)
                 pinFeatures.addAll(issueFeatures)
                 pinFeatures.addAll(pendingFeatures)
@@ -728,7 +833,27 @@ class MapLayerRenderer(
             lastTracksRenderKey = tracksKey
             val seqT = ++trackRenderSeq
             val tracksSnap = snap.tracks
+            val capS = vpS; val capW = vpW; val capN = vpN; val capE = vpE
+            val capZoom = vpZoom; val capUseVp = validVp
             AppExecutors.batchIoExecutor.execute {
+                val nativeTracksJson = RustCoreBridge.buildTracksGeoJsonViewport(
+                    tracks = tracksSnap,
+                    hiddenLayerIds = hiddenLayerIds,
+                    useViewport = capUseVp,
+                    south = capS,
+                    west = capW,
+                    north = capN,
+                    east = capE,
+                    zoom = capZoom
+                )
+                if (nativeTracksJson != null) {
+                    AppExecutors.postMain {
+                        if (isActivityAlive() && seqT == trackRenderSeq && map?.style === style && style.isFullyLoaded) {
+                            style.getSourceAs<GeoJsonSource>(TRACKS_SOURCE)?.setGeoJson(nativeTracksJson)
+                        }
+                    }
+                    return@execute
+                }
                 val trackFeatures = ArrayList<Feature>(tracksSnap.size)
                 for (t in tracksSnap) {
                     if (t.layerId in hiddenLayerIds) continue

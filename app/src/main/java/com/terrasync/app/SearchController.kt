@@ -424,6 +424,7 @@ class SearchController(
                 )
             }
             cachedSearchIndex = ver to built
+            RustCoreBridge.syncSearchIndex(ver, built)
             built
         }
     }
@@ -436,6 +437,31 @@ class SearchController(
         unit: SpeedUnit
     ): List<Pair<SearchIndexEntry, String?>> {
         if (tokens.isEmpty()) return emptyList()
+        val snap = cachedSearchIndex
+        val indexVer = if (snap != null && snap.second === index) {
+            snap.first
+        } else {
+            System.identityHashCode(index).toLong()
+        }
+        val nativeRes = RustCoreBridge.querySearchIndex(
+            version = indexVer,
+            entries = index,
+            tokens = tokens,
+            hasDigits = hasDigits,
+            hasLoc = loc != null,
+            locLat = loc?.latitude ?: 0.0,
+            locLng = loc?.longitude ?: 0.0
+        )
+        if (nativeRes != null) {
+            val (indices, dists) = nativeRes
+            val out = ArrayList<Pair<SearchIndexEntry, String?>>(indices.size)
+            for (i in indices.indices) {
+                val entry = index.getOrNull(indices[i]) ?: continue
+                val distText = if (dists != null) formatDistanceShort(dists[i], unit) else null
+                out.add(entry to distText)
+            }
+            return out
+        }
         val matched = index.filter { entry ->
             tokens.all { tok ->
                 tok in entry.searchBlob || (hasDigits && tok in entry.coordsText)
@@ -758,6 +784,7 @@ class SearchController(
         RoutingEngine.cancelPendingSearch()
         synchronized(searchIndexLock) {
             cachedSearchIndex = null
+            RustCoreBridge.clearSearchIndex()
         }
     }
 }

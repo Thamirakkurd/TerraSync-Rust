@@ -206,7 +206,23 @@ class MapToolsController(
 
     fun handleLassoLoopCompleted(poly: List<PointF>) {
         val m = renderer.map ?: return
-        val inside = renderer.getVisiblePins().filter { p ->
+        val snap = viewModel.folderSnapshot
+        val hiddenLayerIds = DevicePrefs.getHiddenLayerIds(activity)
+        val sentIds = if (viewModel.hideSentPins) DevicePrefs.getLocalSentPinIds(activity) else emptySet()
+        val geoPoly = DoubleArray(poly.size * 2)
+        for (i in poly.indices) {
+            val ll = m.projection.fromScreenLocation(poly[i])
+            geoPoly[i * 2] = ll.longitude
+            geoPoly[i * 2 + 1] = ll.latitude
+        }
+        val inside = RustCoreBridge.filterPinsInGeoPolygon(
+            version = snap.dataVersion,
+            pins = snap.pins,
+            hiddenLayerIds = hiddenLayerIds,
+            sentIds = sentIds,
+            visibleStatuses = viewModel.visibleStatuses,
+            geoPolyLngLat = geoPoly
+        ) ?: renderer.getVisiblePins().filter { p ->
             val pt = m.projection.toScreenLocation(LatLng(p.lat, p.lng))
             LassoOverlayView.isPointInPolygon(pt.x, pt.y, poly)
         }

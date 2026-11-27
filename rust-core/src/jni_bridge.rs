@@ -22,10 +22,7 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeParseKmlBytes
         let encoded = crate::kml::encode_parsed_kml(&parsed);
         env.byte_array_from_slice(&encoded).ok().map(|arr| arr.into_raw())
     }));
-    match result {
-        Ok(Some(arr)) => arr,
-        _ => std::ptr::null_mut(),
-    }
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
 
 #[no_mangle]
@@ -41,10 +38,7 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeParseKmlFile<
         let encoded = crate::kml::encode_parsed_kml(&parsed);
         env.byte_array_from_slice(&encoded).ok().map(|arr| arr.into_raw())
     }));
-    match result {
-        Ok(Some(arr)) => arr,
-        _ => std::ptr::null_mut(),
-    }
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
 
 #[no_mangle]
@@ -58,10 +52,7 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeBuildKmlBytes
         let xml = crate::kml_export::build_kml_bytes(&bytes)?;
         env.byte_array_from_slice(&xml).ok().map(|arr| arr.into_raw())
     }));
-    match result {
-        Ok(Some(arr)) => arr,
-        _ => std::ptr::null_mut(),
-    }
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
 
 #[no_mangle]
@@ -76,10 +67,7 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeExportKmlFile
         let path_str: String = env.get_string(&out_path).ok()?.into();
         Some(crate::kml_export::export_kml_to_file(&bytes, &path_str))
     }));
-    match result {
-        Ok(Some(true)) => 1,
-        _ => 0,
-    }
+    match result { Ok(Some(true)) => 1, _ => 0 }
 }
 
 #[no_mangle]
@@ -99,22 +87,12 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeRouteOffline<
         let path_str: String = env.get_string(&tsr_path).ok()?.into();
         let mode = crate::routing::TravelMode::from_code(mode_code)?;
         let route_res = crate::routing::route_from_tsr(
-            &path_str,
-            last_modified,
-            file_size,
-            start_lat,
-            start_lng,
-            end_lat,
-            end_lng,
-            mode,
+            &path_str, last_modified, file_size, start_lat, start_lng, end_lat, end_lng, mode,
         )?;
         let encoded = crate::routing::encode_route_result(&route_res);
         env.byte_array_from_slice(&encoded).ok().map(|arr| arr.into_raw())
     }));
-    match result {
-        Ok(Some(arr)) => arr,
-        _ => std::ptr::null_mut(),
-    }
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
 
 #[no_mangle]
@@ -142,10 +120,7 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativePatchMvtKurdi
         let out_slice: Vec<u8> = crate::mvt::patch_tile(&bytes).unwrap_or_default();
         env.byte_array_from_slice(&out_slice).ok().map(|arr| arr.into_raw())
     }));
-    match result {
-        Ok(Some(arr)) => arr,
-        _ => std::ptr::null_mut(),
-    }
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
 
 #[no_mangle]
@@ -159,10 +134,7 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeGunzipAndPatc
         let out_slice: Vec<u8> = crate::pmtiles::gunzip_and_patch_mvt(&bytes).unwrap_or_default();
         env.byte_array_from_slice(&out_slice).ok().map(|arr| arr.into_raw())
     }));
-    match result {
-        Ok(Some(arr)) => arr,
-        _ => std::ptr::null_mut(),
-    }
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
 
 #[no_mangle]
@@ -177,10 +149,7 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeWarmPmTiles<'
         let path_str: String = env.get_string(&path).ok()?.into();
         Some(crate::pmtiles::warm_archive(&path_str, last_modified, file_size))
     }));
-    match result {
-        Ok(Some(true)) => 1,
-        _ => 0,
-    }
+    match result { Ok(Some(true)) => 1, _ => 0 }
 }
 
 #[no_mangle]
@@ -193,24 +162,13 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLookupPmTile<
     tile_id: jlong,
 ) -> jbyteArray {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        if tile_id < 0 {
-            return None;
-        }
+        if tile_id < 0 { return None; }
         let path_str: String = env.get_string(&path).ok()?.into();
-        let bytes_opt = crate::pmtiles::lookup_tile(
-            &path_str,
-            last_modified,
-            file_size,
-            tile_id as u64,
-        )
-        .ok()?;
+        let bytes_opt = crate::pmtiles::lookup_tile(&path_str, last_modified, file_size, tile_id as u64).ok()?;
         let slice = bytes_opt.unwrap_or_default();
         env.byte_array_from_slice(&slice).ok().map(|arr| arr.into_raw())
     }));
-    match result {
-        Ok(Some(arr)) => arr,
-        _ => std::ptr::null_mut(),
-    }
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
 
 #[no_mangle]
@@ -224,25 +182,15 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLookupAndPatc
     tile_is_gzipped: jboolean,
 ) -> jbyteArray {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        if tile_id < 0 {
-            return None;
-        }
+        if tile_id < 0 { return None; }
         let path_str: String = env.get_string(&path).ok()?.into();
         let bytes_opt = crate::pmtiles::lookup_and_patch_tile(
-            &path_str,
-            last_modified,
-            file_size,
-            tile_id as u64,
-            tile_is_gzipped != 0,
-        )
-        .ok()?;
+            &path_str, last_modified, file_size, tile_id as u64, tile_is_gzipped != 0,
+        ).ok()?;
         let slice = bytes_opt.unwrap_or_default();
         env.byte_array_from_slice(&slice).ok().map(|arr| arr.into_raw())
     }));
-    match result {
-        Ok(Some(arr)) => arr,
-        _ => std::ptr::null_mut(),
-    }
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
 
 #[no_mangle]
@@ -272,9 +220,7 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeExtractContou
     major_step: jint,
 ) -> jbyteArray {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        if n <= 0 {
-            return None;
-        }
+        if n <= 0 { return None; }
         let len = env.get_array_length(&elev).ok()? as usize;
         let mut buf = vec![0.0f32; len];
         env.get_float_array_region(&elev, 0, &mut buf).ok()?;
@@ -282,8 +228,142 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeExtractContou
         let encoded = crate::contour::encode_contours(&lines);
         env.byte_array_from_slice(&encoded).ok().map(|arr| arr.into_raw())
     }));
-    match result {
-        Ok(Some(arr)) => arr,
-        _ => std::ptr::null_mut(),
-    }
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLoadSearchIndex<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    payload: JByteArray<'local>,
+) -> jboolean {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        Some(crate::search::load_index(version, &bytes))
+    }));
+    match result { Ok(Some(true)) => 1, _ => 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeQuerySearchIndex<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    expected_len: jint,
+    query_payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        if expected_len < 0 { return None; }
+        let bytes = env.convert_byte_array(&query_payload).ok()?;
+        let out = crate::search::query_from_payload(version, expected_len as usize, &bytes)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeClearSearchIndex(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    let _ = std::panic::catch_unwind(crate::search::clear_index);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLoadGeoPins<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    payload: JByteArray<'local>,
+) -> jboolean {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        Some(crate::geojson::load_geo_pins(version, &bytes))
+    }));
+    match result { Ok(Some(true)) => 1, _ => 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeBuildPinsGeoJsonViewport<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    expected_len: jint,
+    filter_payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        if expected_len < 0 { return None; }
+        let bytes = env.convert_byte_array(&filter_payload).ok()?;
+        let json = crate::geojson::build_pins_geojson_viewport(version, expected_len as usize, &bytes)?;
+        env.byte_array_from_slice(&json).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeClearGeoPins(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    let _ = std::panic::catch_unwind(crate::geojson::clear_geo_pins);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeBuildTracksGeoJsonViewport<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let json = crate::geojson::build_tracks_geojson_viewport(&bytes)?;
+        env.byte_array_from_slice(&json).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeFilterPinsInPolygon<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    expected_len: jint,
+    payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        if expected_len < 0 { return None; }
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let out = crate::geojson::filter_pins_in_polygon(version, expected_len as usize, &bytes)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeAnalyzeSameCoordClusters<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let out = crate::pins_ops::analyze_same_coord_clusters(&bytes)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeSortAndScorePins<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let out = crate::pins_ops::sort_and_score_pins(&bytes)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
