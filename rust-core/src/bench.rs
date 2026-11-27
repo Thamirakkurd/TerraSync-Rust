@@ -44,6 +44,9 @@ mod tests {
 
     #[test]
     fn bench_wave6_20k_ops() {
+        let _lock = crate::geojson::TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::geojson::clear_geo_pins();
+        crate::mvt_tracks::clear_geo_tracks();
         let mut load = Vec::with_capacity(20_000 * 64);
         let put_s = |b: &mut Vec<u8>, s: &str| {
             b.extend_from_slice(&(s.len() as u32).to_le_bytes());
@@ -120,6 +123,9 @@ mod tests {
 
     #[test]
     fn bench_wave7_viewport_20k() {
+        let _lock = crate::geojson::TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::geojson::clear_geo_pins();
+        crate::mvt_tracks::clear_geo_tracks();
         let put_s = |b: &mut Vec<u8>, s: &str| {
             b.extend_from_slice(&(s.len() as u32).to_le_bytes());
             b.extend_from_slice(s.as_bytes());
@@ -310,6 +316,9 @@ mod tests {
 
     #[test]
     fn bench_delta_patch_20k() {
+        let _lock = crate::geojson::TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::geojson::clear_geo_pins();
+        crate::mvt_tracks::clear_geo_tracks();
         let put_s = |b: &mut Vec<u8>, s: &str| {
             b.extend_from_slice(&(s.len() as u32).to_le_bytes());
             b.extend_from_slice(s.as_bytes());
@@ -348,6 +357,9 @@ mod tests {
 
     #[test]
     fn bench_wave10_mvt_20k() {
+        let _lock = crate::geojson::TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::geojson::clear_geo_pins();
+        crate::mvt_tracks::clear_geo_tracks();
         let put_s = |b: &mut Vec<u8>, s: &str| {
             b.extend_from_slice(&(s.len() as u32).to_le_bytes());
             b.extend_from_slice(s.as_bytes());
@@ -410,6 +422,9 @@ mod tests {
 
     #[test]
     fn bench_wave11_mvt_tracks_and_delta() {
+        let _lock = crate::geojson::TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::geojson::clear_geo_pins();
+        crate::mvt_tracks::clear_geo_tracks();
         let put_s = |b: &mut Vec<u8>, s: &str| {
             b.extend_from_slice(&(s.len() as u32).to_le_bytes());
             b.extend_from_slice(s.as_bytes());
