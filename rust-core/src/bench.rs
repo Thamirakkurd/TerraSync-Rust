@@ -347,6 +347,68 @@ mod tests {
     }
 
     #[test]
+    fn bench_wave10_mvt_20k() {
+        let put_s = |b: &mut Vec<u8>, s: &str| {
+            b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            b.extend_from_slice(s.as_bytes());
+        };
+        let mut load = Vec::with_capacity(20_000 * 64);
+        put_s(&mut load, "pin-done");
+        put_s(&mut load, "pin-issue");
+        put_s(&mut load, "pin-pending");
+        load.extend_from_slice(&20_000u32.to_le_bytes());
+        for i in 0..20_000usize {
+            put_s(&mut load, &format!("id-{i}"));
+            put_s(&mut load, "layer1");
+            put_s(&mut load, &format!("MTR-{i:05} ئاکرێ"));
+            load.push((i % 3) as u8);
+            load.extend_from_slice(&(43.85_f64 + (i / 200) as f64 * 0.001).to_le_bytes());
+            load.extend_from_slice(&(36.70_f64 + (i % 200) as f64 * 0.001).to_le_bytes());
+        }
+        assert!(crate::geojson::load_geo_pins(1000, &load));
+
+        let (mx, my) = crate::geojson::lng_lat_to_mercator_unit(43.90, 36.75);
+        let z = 13;
+        let n = (1 << z) as f64;
+        let cx = (mx * n).floor() as i32;
+        let cy = (my * n).floor() as i32;
+
+        // Unclustered 3x3 viewport (9 tiles)
+        let mut flt_u = vec![0b111u8, 0u8, 1u8];
+        flt_u.extend_from_slice(&0u32.to_le_bytes());
+        flt_u.extend_from_slice(&0u32.to_le_bytes());
+        assert!(crate::mvt_pins::set_mvt_filter(&flt_u));
+        let t0 = Instant::now();
+        let mut bytes_u = 0usize;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                bytes_u += crate::mvt_pins::render_pins_mvt_tile(z, cx + dx, cy + dy).len();
+            }
+        }
+        let unclustered_9tiles_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // Clustered 3x3 viewport (9 tiles)
+        let mut flt_c = vec![0b111u8, 1u8, 1u8];
+        flt_c.extend_from_slice(&0u32.to_le_bytes());
+        flt_c.extend_from_slice(&0u32.to_le_bytes());
+        assert!(crate::mvt_pins::set_mvt_filter(&flt_c));
+        let t1 = Instant::now();
+        let mut bytes_c = 0usize;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                bytes_c += crate::mvt_pins::render_pins_mvt_tile(z, cx + dx, cy + dy).len();
+            }
+        }
+        let clustered_9tiles_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        crate::geojson::clear_geo_pins();
+
+        println!(
+            "WAVE10_MVT_20K | 9_tiles_unclustered={:.2} ms ({} KB) | 9_tiles_clustered={:.2} ms ({} KB)",
+            unclustered_9tiles_ms, bytes_u / 1024, clustered_9tiles_ms, bytes_c / 1024
+        );
+    }
+
+    #[test]
     fn bench_native_engines() {
         // 1. KML parse + export benchmark (500 field pins)
         let mut kml = String::from(

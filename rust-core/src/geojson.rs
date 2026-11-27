@@ -4,28 +4,31 @@ use std::sync::{OnceLock, RwLock};
 
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
 
-struct GeoPin {
-    id: String,
-    layer_id: String,
-    name: String,
-    label_shaped: String,
-    status_code: u8, // 0=done, 1=issue, 2=pending
-    lng: f64,
-    lat: f64,
+pub(crate) struct GeoPin {
+    pub(crate) id: String,
+    pub(crate) layer_id: String,
+    pub(crate) name: String,
+    pub(crate) label_shaped: String,
+    pub(crate) status_code: u8, // 0=done, 1=issue, 2=pending
+    pub(crate) lng: f64,
+    pub(crate) lat: f64,
+    pub(crate) mx: f64,
+    pub(crate) my: f64,
 }
 
-struct CachedGeoPins {
-    version: i64,
-    done_icon: String,
-    issue_icon: String,
-    pending_icon: String,
-    pins: Vec<GeoPin>,
-    id_to_idx: HashMap<String, usize>,
+pub(crate) struct CachedGeoPins {
+    pub(crate) version: i64,
+    pub(crate) done_icon: String,
+    pub(crate) issue_icon: String,
+    pub(crate) pending_icon: String,
+    pub(crate) pins: Vec<GeoPin>,
+    pub(crate) id_to_idx: HashMap<String, usize>,
+    pub(crate) x_index: Vec<(f64, usize)>,
 }
 
 static GEO_PINS_CACHE: OnceLock<RwLock<Option<CachedGeoPins>>> = OnceLock::new();
 
-fn cache_lock() -> &'static RwLock<Option<CachedGeoPins>> {
+pub(crate) fn cache_lock() -> &'static RwLock<Option<CachedGeoPins>> {
     GEO_PINS_CACHE.get_or_init(|| RwLock::new(None))
 }
 
@@ -73,6 +76,14 @@ fn haversine_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
         + lat1.to_radians().cos() * lat2.to_radians().cos() * (d_lon * 0.5).sin().powi(2);
     let c = 2.0 * a.sqrt().atan2((1.0 - a).max(0.0).sqrt());
     EARTH_RADIUS_M * c
+}
+
+#[inline]
+pub(crate) fn lng_lat_to_mercator_unit(lng: f64, lat: f64) -> (f64, f64) {
+    let mx = ((lng + 180.0) / 360.0).clamp(0.0, 1.0);
+    let sin_lat = lat.clamp(-85.05112878, 85.05112878).to_radians().sin();
+    let my = (0.5 - ((1.0 + sin_lat) / (1.0 - sin_lat)).ln() / (4.0 * std::f64::consts::PI)).clamp(0.0, 1.0);
+    (mx, my)
 }
 
 #[inline]
@@ -147,6 +158,11 @@ pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
         };
         let id_owned = id.to_owned();
         id_to_idx.insert(id_owned.clone(), idx);
+        let (mx, my) = if lng.is_finite() && lat.is_finite() {
+            lng_lat_to_mercator_unit(lng, lat)
+        } else {
+            (-1.0, -1.0)
+        };
         pins.push(GeoPin {
             id: id_owned,
             layer_id: layer_id.to_owned(),
@@ -155,8 +171,17 @@ pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
             status_code,
             lng,
             lat,
+            mx,
+            my,
         });
     }
+    let mut x_index: Vec<(f64, usize)> = pins
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.mx >= 0.0)
+        .map(|(i, p)| (p.mx, i))
+        .collect();
+    x_index.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let Ok(mut guard) = cache_lock().write() else {
         return false;
@@ -168,6 +193,7 @@ pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
         pending_icon: pending_icon.to_owned(),
         pins,
         id_to_idx,
+        x_index,
     });
     true
 }
@@ -384,6 +410,7 @@ pub fn patch_geo_pins(
         resolved.push((idx, layer_id, name, status_code, lng, lat));
     }
 
+    let mut coords_changed = false;
     for (idx, layer_id, name, status_code, lng, lat) in resolved {
         let pin = &mut cached.pins[idx];
         if pin.layer_id != layer_id {
@@ -396,11 +423,42 @@ pub fn patch_geo_pins(
             pin.label_shaped = truncate_and_shape_label(name);
         }
         pin.status_code = status_code;
-        pin.lng = lng;
-        pin.lat = lat;
+        if pin.lng != lng || pin.lat != lat {
+            pin.lng = lng;
+            pin.lat = lat;
+            let (mx, my) = if lng.is_finite() && lat.is_finite() {
+                lng_lat_to_mercator_unit(lng, lat)
+            } else {
+                (-1.0, -1.0)
+            };
+            pin.mx = mx;
+            pin.my = my;
+            coords_changed = true;
+        }
+    }
+    if coords_changed {
+        cached.x_index = cached
+            .pins
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.mx >= 0.0)
+            .map(|(i, p)| (p.mx, i))
+            .collect();
+        cached.x_index.sort_by(|a, b| a.0.total_cmp(&b.0));
     }
     cached.version = new_version;
     true
+}
+
+
+pub fn is_geo_pins_synced(version: i64, expected_len: usize) -> bool {
+    let Ok(guard) = cache_lock().read() else {
+        return false;
+    };
+    match guard.as_ref() {
+        Some(cached) => cached.version == version && cached.pins.len() == expected_len,
+        None => false,
+    }
 }
 
 pub fn clear_geo_pins() {

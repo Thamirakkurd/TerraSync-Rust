@@ -23,7 +23,7 @@ object RustCoreBridge {
     fun isAvailable(): Boolean = loaded
 
     fun activeModulesSummary(): String =
-        "KML/CSV I/O, TSR1/Nav, MVT Kurdish, PMTiles v3, Contours, Search, GeoJSON, Clusters, Lasso, Reports, Audit"
+        "KML/CSV, TSR1/Nav, MVT Pins & Kurdish, PMTiles v3, Contours, Search, Clusters, Lasso, Reports, Audit"
 
     @JvmStatic private external fun nativePing(): Int
     @JvmStatic private external fun nativeDecodePolyline6(encoded: String): ByteArray?
@@ -57,6 +57,9 @@ object RustCoreBridge {
     @JvmStatic private external fun nativeQuerySearchIndex(version: Long, expectedLen: Int, queryPayload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeClearSearchIndex()
     @JvmStatic private external fun nativeLoadGeoPins(version: Long, payload: ByteArray): Boolean
+    @JvmStatic private external fun nativeIsGeoPinsSynced(version: Long, expectedLen: Int): Boolean
+    @JvmStatic private external fun nativeSetMvtPinsFilter(payload: ByteArray): Boolean
+    @JvmStatic private external fun nativeRenderPinsMvtTile(z: Int, x: Int, y: Int): ByteArray?
     @JvmStatic private external fun nativePatchGeoPins(oldVersion: Long, newVersion: Long, expectedLen: Int, payload: ByteArray): Boolean
     @JvmStatic private external fun nativeBuildPinsGeoJsonViewport(version: Long, expectedLen: Int, filterPayload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeClearGeoPins()
@@ -884,5 +887,45 @@ object RustCoreBridge {
             }
             nativePatchGeoPins(oldVersion, newVersion, expectedLen, out.toByteArray())
         }.getOrDefault(false)
+    }
+
+    fun ensureGeoPinsSynced(version: Long, pins: List<PinItem>): Boolean {
+        if (!loaded) return false
+        val already = runCatching { nativeIsGeoPinsSynced(version, pins.size) }.getOrDefault(false)
+        if (already) return true
+        return syncGeoPins(version, pins)
+    }
+
+    fun setMvtPinsFilter(
+        visibleStatuses: Set<String>,
+        clustered: Boolean,
+        showTitles: Boolean,
+        hiddenLayerIds: Set<String>,
+        sentIds: Set<String>
+    ): Boolean {
+        if (!loaded) return false
+        return runCatching {
+            val out = ByteArrayOutputStream(64 + hiddenLayerIds.size * 24 + sentIds.size * 24)
+            val nb = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+            var mask = 0
+            if (PinStatus.DONE.key in visibleStatuses) mask = mask or 1
+            if (PinStatus.ISSUE.key in visibleStatuses) mask = mask or 2
+            if (PinStatus.PENDING.key in visibleStatuses) mask = mask or 4
+            out.write(mask)
+            out.write(if (clustered) 1 else 0)
+            out.write(if (showTitles) 1 else 0)
+            putInt(hiddenLayerIds.size)
+            for (id in hiddenLayerIds) putStr(id)
+            putInt(sentIds.size)
+            for (id in sentIds) putStr(id)
+            nativeSetMvtPinsFilter(out.toByteArray())
+        }.getOrDefault(false)
+    }
+
+    fun renderPinsMvtTile(z: Int, x: Int, y: Int): ByteArray {
+        if (!loaded) return ByteArray(0)
+        return runCatching { nativeRenderPinsMvtTile(z, x, y) }.getOrNull() ?: ByteArray(0)
     }
 }

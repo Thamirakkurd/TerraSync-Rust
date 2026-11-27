@@ -17,6 +17,14 @@ import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.sources.GeoJsonOptions
 import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.android.style.sources.TileData
+import org.maplibre.android.style.sources.CustomVectorTileProvider
+import org.maplibre.android.style.sources.CustomVectorSource
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import java.util.concurrent.ConcurrentHashMap
 import org.maplibre.android.style.sources.RasterDemSource
 import org.maplibre.android.style.sources.TileSet
 import org.maplibre.geojson.Feature
@@ -63,6 +71,8 @@ class MapLayerRenderer(
         const val RULER_POINTS_CIRCLE_LAYER = "terrasync-ruler-points-circle-layer"
         const val RULER_POINTS_NUM_LAYER = "terrasync-ruler-points-num-layer"
         const val PINS_SOURCE = "terrasync-pins-source"
+        const val PINS_MVT_SOURCE = "terrasync-pins-mvt-source"
+        const val PINS_MVT_SOURCE_LAYER = "pins"
         const val PINS_CLUSTER_SOURCE = "terrasync-pins-cluster-source"
         const val PINS_LAYER = "terrasync-pins-layer"
         const val PINS_LABELS_LAYER = "terrasync-pins-labels-layer"
@@ -145,6 +155,23 @@ class MapLayerRenderer(
     private val trackPointCache = HashMap<String, Pair<Long, List<Point>>>()
     private var pulseAnimator: ValueAnimator? = null
     private var cameraIdleMap: MapLibreMap? = null
+    private val mvtTileScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val requestedMvtTiles = ConcurrentHashMap.newKeySet<Long>()
+
+    private fun packTileKey(z: Int, x: Int, y: Int): Long =
+        ((z.toLong() and 0x3FL) shl 48) or ((x.toLong() and 0xFFFFFFL) shl 24) or (y.toLong() and 0xFFFFFFL)
+
+    private fun invalidateTrackedMvtTiles(style: Style) {
+        val mvtSrc = style.getSourceAs<CustomVectorSource>(PINS_MVT_SOURCE) ?: return
+        val snapshotKeys = requestedMvtTiles.toList()
+        requestedMvtTiles.clear()
+        for (k in snapshotKeys) {
+            val z = ((k ushr 48) and 0x3FL).toInt()
+            val x = ((k ushr 24) and 0xFFFFFFL).toInt()
+            val y = (k and 0xFFFFFFL).toInt()
+            mvtSrc.invalidateTile(z, x, y)
+        }
+    }
     private var hasViewportCull: Boolean = false
     private var lastVpSouth: Double = -90.0
     private var lastVpNorth: Double = 90.0
@@ -165,10 +192,12 @@ class MapLayerRenderer(
     private fun onMapCameraIdleForViewport() {
         if (!isActivityAlive() || !RustCoreBridge.isAvailable()) return
         val snap = viewModel.folderSnapshot
-        if (snap.pins.size <= 1500) return
         val m = map ?: return
         val style = m.style ?: return
         if (!style.isFullyLoaded) return
+        val usingMvt = style.getSource(PINS_MVT_SOURCE) != null
+        if (usingMvt && snap.tracks.isEmpty()) return
+        if (!usingMvt && snap.pins.size <= 1500) return
         val bounds = runCatching { m.projection.visibleRegion.latLngBounds }.getOrNull() ?: return
         val zoom = m.cameraPosition.zoom
         if (hasViewportCull &&
@@ -180,7 +209,7 @@ class MapLayerRenderer(
         ) {
             return
         }
-        lastPinsRenderKey = null
+        if (!usingMvt) lastPinsRenderKey = null
         lastTracksRenderKey = null
         renderPinsAndTracks(style)
     }
@@ -204,7 +233,9 @@ class MapLayerRenderer(
         pulseAnimator = null
         synchronized(trackPointCache) {
             trackPointCache.clear()
-            RustCoreBridge.clearGeoPinsCache()
+            mvtTileScope.cancel()
+        requestedMvtTiles.clear()
+        RustCoreBridge.clearGeoPinsCache()
         }
         map = null
     }
@@ -550,61 +581,99 @@ class MapLayerRenderer(
     }
 
     private fun attachPinsSourceAndLayers(style: Style) {
-        if (style.getSource(PINS_SOURCE) != null) return
+        val useRustMvt = RustCoreBridge.isAvailable()
+        if (useRustMvt) {
+            if (style.getSource(PINS_MVT_SOURCE) != null) return
+        } else {
+            if (style.getSource(PINS_SOURCE) != null) return
+        }
         val darkLabels = isDarkMapUi() || viewModel.mapStyleMode == MapStyleMode.SATELLITE
         val labelColor = if (darkLabels) "#F8FAFC" else "#0F172A"
         val haloColor = if (darkLabels) "#0F172A" else "#FFFFFF"
         val showTitles = DevicePrefs.isShowBookmarkTitles(context)
         val clustered = DevicePrefs.isClusterDensePins(context)
 
-        style.addSource(GeoJsonSource(PINS_SOURCE, FeatureCollection.fromFeatures(emptyList<Feature>())))
-        style.addSource(
-            GeoJsonSource(
-                PINS_CLUSTER_SOURCE,
-                FeatureCollection.fromFeatures(emptyList<Feature>()),
-                GeoJsonOptions()
-                    .withCluster(true)
-                    .withClusterMaxZoom(15)
-                .withClusterRadius(48)
-                .withTolerance(0.5f)
+        val unclusteredSrcId: String
+        val clusteredSrcId: String
+        if (useRustMvt) {
+            requestedMvtTiles.clear()
+            val provider = object : CustomVectorTileProvider {
+                override suspend fun fetchTile(z: Int, x: Int, y: Int): TileData {
+                    requestedMvtTiles.add(packTileKey(z, x, y))
+                    return TileData.Mvt(RustCoreBridge.renderPinsMvtTile(z, x, y))
+                }
+            }
+            style.addSource(
+                CustomVectorSource(
+                    id = PINS_MVT_SOURCE,
+                    provider = provider,
+                    scope = mvtTileScope,
+                    minZoom = 0,
+                    maxZoom = 17
+                )
             )
-        )
+            unclusteredSrcId = PINS_MVT_SOURCE
+            clusteredSrcId = PINS_MVT_SOURCE
+        } else {
+            style.addSource(GeoJsonSource(PINS_SOURCE, FeatureCollection.fromFeatures(emptyList<Feature>())))
+            style.addSource(
+                GeoJsonSource(
+                    PINS_CLUSTER_SOURCE,
+                    FeatureCollection.fromFeatures(emptyList<Feature>()),
+                    GeoJsonOptions()
+                        .withCluster(true)
+                        .withClusterMaxZoom(15)
+                        .withClusterRadius(48)
+                        .withTolerance(0.5f)
+                )
+            )
+            unclusteredSrcId = PINS_SOURCE
+            clusteredSrcId = PINS_CLUSTER_SOURCE
+        }
 
-        fun makePinLabelLayer(layerId: String, srcId: String) = SymbolLayer(layerId, srcId).withProperties(
-            PropertyFactory.textField(Expression.get("label")),
-            PropertyFactory.textFont(arrayOf("Noto Sans Regular")),
-            PropertyFactory.textSize(10.5f),
-            PropertyFactory.textMaxWidth(9.0f),
-            PropertyFactory.textLineHeight(1.05f),
-            PropertyFactory.textPadding(6f),
-            PropertyFactory.textColor(labelColor),
-            PropertyFactory.textHaloColor(haloColor),
-            PropertyFactory.textHaloWidth(1.8f),
-            PropertyFactory.textOffset(arrayOf(0f, 0.25f)),
-            PropertyFactory.textAnchor(Property.TEXT_ANCHOR_TOP),
-            PropertyFactory.textAllowOverlap(false),
-            PropertyFactory.textIgnorePlacement(false),
-            PropertyFactory.textOptional(true)
-        ).apply { minZoom = 13.5f }
+        fun makePinLabelLayer(layerId: String, srcId: String) = SymbolLayer(layerId, srcId).apply {
+            if (useRustMvt) setSourceLayer(PINS_MVT_SOURCE_LAYER)
+            setProperties(
+                PropertyFactory.textField(Expression.get("label")),
+                PropertyFactory.textFont(arrayOf("Noto Sans Regular")),
+                PropertyFactory.textSize(10.5f),
+                PropertyFactory.textMaxWidth(9.0f),
+                PropertyFactory.textLineHeight(1.05f),
+                PropertyFactory.textPadding(6f),
+                PropertyFactory.textColor(labelColor),
+                PropertyFactory.textHaloColor(haloColor),
+                PropertyFactory.textHaloWidth(1.8f),
+                PropertyFactory.textOffset(arrayOf(0f, 0.25f)),
+                PropertyFactory.textAnchor(Property.TEXT_ANCHOR_TOP),
+                PropertyFactory.textAllowOverlap(false),
+                PropertyFactory.textIgnorePlacement(false),
+                PropertyFactory.textOptional(true)
+            )
+            minZoom = 13.5f
+        }
 
-        fun makePinIconLayer(layerId: String, srcId: String) = SymbolLayer(layerId, srcId).withProperties(
-            PropertyFactory.iconImage(Expression.get("icon")),
-            PropertyFactory.iconAnchor(Property.ICON_ANCHOR_BOTTOM),
-            PropertyFactory.iconOffset(arrayOf(0f, MapBitmaps.BOOKMARK_PIN_TIP_BOTTOM_PAD_DP)),
-            PropertyFactory.iconSize(1.0f),
-            PropertyFactory.iconAllowOverlap(true),
-            PropertyFactory.iconIgnorePlacement(true)
-        )
+        fun makePinIconLayer(layerId: String, srcId: String) = SymbolLayer(layerId, srcId).apply {
+            if (useRustMvt) setSourceLayer(PINS_MVT_SOURCE_LAYER)
+            setProperties(
+                PropertyFactory.iconImage(Expression.get("icon")),
+                PropertyFactory.iconAnchor(Property.ICON_ANCHOR_BOTTOM),
+                PropertyFactory.iconOffset(arrayOf(0f, MapBitmaps.BOOKMARK_PIN_TIP_BOTTOM_PAD_DP)),
+                PropertyFactory.iconSize(1.0f),
+                PropertyFactory.iconAllowOverlap(true),
+                PropertyFactory.iconIgnorePlacement(true)
+            )
+        }
 
-        val labelLayer = makePinLabelLayer(PINS_LABELS_LAYER, PINS_SOURCE)
-        val clusterLabelLayer = makePinLabelLayer(PINS_CLUSTER_LABELS_LAYER, PINS_CLUSTER_SOURCE).apply {
+        val labelLayer = makePinLabelLayer(PINS_LABELS_LAYER, unclusteredSrcId)
+        val clusterLabelLayer = makePinLabelLayer(PINS_CLUSTER_LABELS_LAYER, clusteredSrcId).apply {
             setFilter(Expression.not(Expression.has("point_count")))
         }
-        val pinLayer = makePinIconLayer(PINS_LAYER, PINS_SOURCE)
-        val clusterPinLayer = makePinIconLayer(PINS_CLUSTER_UNCLUSTERED_LAYER, PINS_CLUSTER_SOURCE).apply {
+        val pinLayer = makePinIconLayer(PINS_LAYER, unclusteredSrcId)
+        val clusterPinLayer = makePinIconLayer(PINS_CLUSTER_UNCLUSTERED_LAYER, clusteredSrcId).apply {
             setFilter(Expression.not(Expression.has("point_count")))
         }
-        val clusterCircleLayer = CircleLayer(PINS_CLUSTER_CIRCLE_LAYER, PINS_CLUSTER_SOURCE).apply {
+        val clusterCircleLayer = CircleLayer(PINS_CLUSTER_CIRCLE_LAYER, clusteredSrcId).apply {
+            if (useRustMvt) setSourceLayer(PINS_MVT_SOURCE_LAYER)
             setFilter(Expression.has("point_count"))
             setProperties(
                 PropertyFactory.circleColor(Color.parseColor("#18794E")),
@@ -622,7 +691,8 @@ class MapLayerRenderer(
                 PropertyFactory.circleOpacity(0.95f)
             )
         }
-        val clusterCountLayer = SymbolLayer(PINS_CLUSTER_COUNT_LAYER, PINS_CLUSTER_SOURCE).apply {
+        val clusterCountLayer = SymbolLayer(PINS_CLUSTER_COUNT_LAYER, clusteredSrcId).apply {
+            if (useRustMvt) setSourceLayer(PINS_MVT_SOURCE_LAYER)
             setFilter(Expression.has("point_count"))
             setProperties(
                 PropertyFactory.textField(
@@ -741,11 +811,24 @@ class MapLayerRenderer(
             lastVpZoom = vpZoom
         }
 
-        val pinsKey = "${snap.dataVersion}|$clustered|${statusesSnap.hashCode()}|${statusesSnap.size}|${hiddenLayerIds.hashCode()}|${hiddenLayerIds.size}|${viewModel.hideSentPins}|${sentIds.hashCode()}|${sentIds.size}"
+        val useMvtPins = RustCoreBridge.isAvailable() && style.getSource(PINS_MVT_SOURCE) != null
+        val pinsKey = "${snap.dataVersion}|$clustered|$showTitles|${statusesSnap.hashCode()}|${statusesSnap.size}|${hiddenLayerIds.hashCode()}|${hiddenLayerIds.size}|${viewModel.hideSentPins}|${sentIds.hashCode()}|${sentIds.size}"
         if (pinsKey != lastPinsRenderKey) {
             lastPinsRenderKey = pinsKey
             val seq = ++pinRenderSeq
             val pinsSnap = snap.pins
+            if (useMvtPins) {
+                AppExecutors.batchIoExecutor.execute {
+                    RustCoreBridge.ensureGeoPinsSynced(snap.dataVersion, pinsSnap)
+                    RustCoreBridge.setMvtPinsFilter(statusesSnap, clustered, showTitles, hiddenLayerIds, sentIds)
+                    AppExecutors.postMain {
+                        if (isActivityAlive() && seq == pinRenderSeq && map?.style === style && style.isFullyLoaded) {
+                            applyPinClusterModeVisibility(style, clustered, showTitles)
+                            invalidateTrackedMvtTiles(style)
+                        }
+                    }
+                }
+            } else {
             val selPinId = viewModel.selectedPinId
             val capS = vpS; val capW = vpW; val capN = vpN; val capE = vpE
             val capZoom = vpZoom; val capUseVp = validVp
@@ -826,8 +909,8 @@ class MapLayerRenderer(
                     }
                 }
             }
+                    }
         }
-
         val tracksKey = "${snap.dataVersion}|${hiddenLayerIds.hashCode()}|${hiddenLayerIds.size}"
         if (tracksKey != lastTracksRenderKey) {
             lastTracksRenderKey = tracksKey

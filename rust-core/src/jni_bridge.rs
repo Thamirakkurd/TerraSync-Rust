@@ -561,3 +561,48 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativePatchGeoPins<
     match result { Ok(Some(true)) => 1, _ => 0 }
 }
 
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeSetMvtPinsFilter<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+) -> jboolean {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        Some(crate::mvt_pins::set_mvt_filter(&bytes))
+    }));
+    match result { Ok(Some(true)) => 1, _ => 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeRenderPinsMvtTile<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    z: jint,
+    x: jint,
+    y: jint,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let mvt = crate::mvt_pins::render_pins_mvt_tile(z, x, y);
+        env.byte_array_from_slice(&mvt).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeIsGeoPinsSynced(
+    _env: JNIEnv,
+    _class: JClass,
+    version: jlong,
+    expected_len: jint,
+) -> jboolean {
+    if expected_len < 0 {
+        return 0;
+    }
+    let ok = std::panic::catch_unwind(|| {
+        crate::geojson::is_geo_pins_synced(version, expected_len as usize)
+    })
+    .unwrap_or(false);
+    if ok { 1 } else { 0 }
+}
+

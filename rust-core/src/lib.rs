@@ -14,4 +14,5 @@ pub mod nav_geo;
 pub mod csv_export;
 pub mod contour_geo;
 pub mod audit;
+pub mod mvt_pins;
 pub mod jni_bridge;
