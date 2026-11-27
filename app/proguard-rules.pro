@@ -24,3 +24,6 @@
 # OkHttp
 -dontwarn okhttp3.**
 -dontwarn okio.**
+
+# Keep Rust JNI bridge methods
+-keep class com.terrasync.app.RustCoreBridge { *; }

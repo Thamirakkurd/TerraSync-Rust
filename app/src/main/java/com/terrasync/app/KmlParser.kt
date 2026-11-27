@@ -219,6 +219,7 @@ object KmlParser {
                 src
             }
             xmlPayload.use { kml ->
+                RustCoreBridge.parseKml(kml.memBytes, kml.tempFile, layerId)?.let { return@use it }
                 runCatching {
                     kml.openStream().use { s -> parseKmlXmlStream(skipUtf8Bom(s), layerId, sanitizeStream = false) }
                 }.getOrElse {

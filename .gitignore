@@ -10,3 +10,5 @@ local.properties
 TerraSync_*.txt
 .ref_screens/
 .test_runs/
+rust-core/target/
+app/src/main/jniLibs/
