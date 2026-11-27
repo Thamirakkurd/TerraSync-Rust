@@ -14,7 +14,7 @@
         android:allowBackup="true"
         android:icon="@drawable/ic_app_icon"
         android:roundIcon="@drawable/ic_app_icon"
-        android:label="TerraSync"
+        android:label="TerraSync Rust"
         android:largeHeap="true"
         android:supportsRtl="true"
         android:theme="@style/Theme.TerraSync">
@@ -40,7 +40,7 @@
             android:name=".TerraSyncCarAppService"
             android:exported="true"
             android:icon="@drawable/ic_app_icon"
-            android:label="TerraSync">
+            android:label="TerraSync Rust">
             <intent-filter>
                 <action android:name="androidx.car.app.CarAppService" />
                 <category android:name="androidx.car.app.category.POI" />

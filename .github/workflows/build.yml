@@ -81,7 +81,7 @@ jobs:
       - name: Rename APK
         run: |
           VERSION="${GITHUB_REF_NAME:-manual}"
-          cp app/build/outputs/apk/release/app-release.apk "TerraSync-${VERSION}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "TerraSync-Rust-${VERSION}.apk"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v5

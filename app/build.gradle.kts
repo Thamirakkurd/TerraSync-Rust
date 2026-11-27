@@ -9,7 +9,7 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.terrasync.app"
+        applicationId = "com.terrasync.rust"
         minSdk = 24
         targetSdk = 34
         val tagVer = (project.findProperty("appVersionName") as String?)
@@ -70,8 +70,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            if (hasReleaseSigning) {
-                signingConfig = signingConfigs.getByName("release")
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
             }
         }
     }
