@@ -62,7 +62,7 @@ object LocalPmTilesStore {
     )
 
     sealed class TileLookup {
-        class Found(val bytes: ByteArray, val isGzipped: Boolean) : TileLookup()
+        class Found(val bytes: ByteArray, val isGzipped: Boolean, val alreadyPatched: Boolean = false) : TileLookup()
         object EmptyInBounds : TileLookup()
         object Miss : TileLookup()
     }
@@ -454,9 +454,16 @@ object LocalPmTilesStore {
             if (z < h.minZoom || z > h.maxZoom) continue
             val overlaps = tEast >= h.minLng && tWest <= h.maxLng && tNorth >= h.minLat && tSouth <= h.maxLat
             if (!overlaps) continue
-            val bytes = arc.lookupTile(tileId)
-            if (bytes != null) {
-                return TileLookup.Found(bytes, h.tileCompression == COMPRESSION_GZIP)
+            val prepared = RustCoreBridge.lookupAndPatchPmTile(arc.file, tileId, h.tileCompression == COMPRESSION_GZIP)
+            if (prepared != null) {
+                if (prepared.isNotEmpty()) {
+                    return TileLookup.Found(prepared, isGzipped = false, alreadyPatched = true)
+                }
+            } else {
+                val bytes = arc.lookupTile(tileId)
+                if (bytes != null) {
+                    return TileLookup.Found(bytes, h.tileCompression == COMPRESSION_GZIP)
+                }
             }
             if (tWest >= h.minLng && tEast <= h.maxLng && tSouth >= h.minLat && tNorth <= h.maxLat) {
                 strictlyInsideAny = true

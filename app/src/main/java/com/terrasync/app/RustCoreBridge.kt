@@ -3,6 +3,7 @@ package com.terrasync.app
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.LineString
 import org.maplibre.geojson.Point
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -19,6 +20,9 @@ object RustCoreBridge {
 
     fun isAvailable(): Boolean = loaded
 
+    fun activeModulesSummary(): String =
+        "KML I/O, TSR1 Routing, MVT Kurdish, PMTiles v3, Contours"
+
     @JvmStatic
     private external fun nativePing(): Int
 
@@ -27,6 +31,12 @@ object RustCoreBridge {
 
     @JvmStatic
     private external fun nativeParseKmlFile(path: String): ByteArray?
+
+    @JvmStatic
+    private external fun nativeBuildKmlBytes(payload: ByteArray): ByteArray?
+
+    @JvmStatic
+    private external fun nativeExportKmlFile(payload: ByteArray, outPath: String): Boolean
 
     @JvmStatic
     private external fun nativeRouteOffline(
@@ -47,6 +57,9 @@ object RustCoreBridge {
     private external fun nativePatchMvtKurdish(rawMvt: ByteArray): ByteArray?
 
     @JvmStatic
+    private external fun nativeGunzipAndPatchMvt(rawOrGz: ByteArray): ByteArray?
+
+    @JvmStatic
     private external fun nativeWarmPmTiles(path: String, lastModified: Long, fileSize: Long): Boolean
 
     @JvmStatic
@@ -55,6 +68,15 @@ object RustCoreBridge {
         lastModified: Long,
         fileSize: Long,
         tileId: Long
+    ): ByteArray?
+
+    @JvmStatic
+    private external fun nativeLookupAndPatchPmTile(
+        path: String,
+        lastModified: Long,
+        fileSize: Long,
+        tileId: Long,
+        tileIsGzipped: Boolean
     ): ByteArray?
 
     @JvmStatic
@@ -81,6 +103,19 @@ object RustCoreBridge {
             }
         }.getOrNull() ?: return null
         return runCatching { decodeParsedKml(encoded, layerId) }.getOrNull()
+    }
+
+    fun buildKmlXml(exportTitle: String, pins: List<PinItem>, tracks: List<TrackItem>): String? {
+        if (!loaded) return null
+        val payload = runCatching { encodeKmlExportPayload(exportTitle, pins, tracks) }.getOrNull() ?: return null
+        val xmlBytes = runCatching { nativeBuildKmlBytes(payload) }.getOrNull() ?: return null
+        return String(xmlBytes, Charsets.UTF_8)
+    }
+
+    fun exportKmlToFile(outFile: File, exportTitle: String, pins: List<PinItem>, tracks: List<TrackItem>): Boolean {
+        if (!loaded) return false
+        val payload = runCatching { encodeKmlExportPayload(exportTitle, pins, tracks) }.getOrNull() ?: return false
+        return runCatching { nativeExportKmlFile(payload, outFile.absolutePath) }.getOrDefault(false)
     }
 
     fun routeOffline(
@@ -117,10 +152,15 @@ object RustCoreBridge {
         runCatching { nativeEvictRoadGraph(tsrPath) }
     }
 
-    /** Returns patched bytes, empty ByteArray if unmodified, or null if native is unavailable. */
     fun patchMvtKurdish(rawMvt: ByteArray): ByteArray? {
         if (!loaded) return null
         return runCatching { nativePatchMvtKurdish(rawMvt) }.getOrNull()
+    }
+
+    /** Returns inflated+patched bytes, empty ByteArray if unmodified plain MVT, or null if native unavailable. */
+    fun gunzipAndPatchMvt(rawOrGz: ByteArray): ByteArray? {
+        if (!loaded) return null
+        return runCatching { nativeGunzipAndPatchMvt(rawOrGz) }.getOrNull()
     }
 
     fun warmPmTilesArchive(file: File): Boolean {
@@ -130,11 +170,18 @@ object RustCoreBridge {
         }.getOrDefault(false)
     }
 
-    /** Returns tile bytes, empty ByteArray on valid miss, or null if native failed/unavailable. */
     fun lookupPmTile(file: File, tileId: Long): ByteArray? {
         if (!loaded) return null
         return runCatching {
             nativeLookupPmTile(file.absolutePath, file.lastModified(), file.length(), tileId)
+        }.getOrNull()
+    }
+
+    /** Fused lookup + inflate + Kurdish MVT patch. Returns tile bytes, empty on valid miss, or null on fallback. */
+    fun lookupAndPatchPmTile(file: File, tileId: Long, tileIsGzipped: Boolean): ByteArray? {
+        if (!loaded) return null
+        return runCatching {
+            nativeLookupAndPatchPmTile(file.absolutePath, file.lastModified(), file.length(), tileId, tileIsGzipped)
         }.getOrNull()
     }
 
@@ -180,6 +227,54 @@ object RustCoreBridge {
             }
             true
         }.getOrDefault(false)
+    }
+
+    private fun encodeKmlExportPayload(
+        exportTitle: String,
+        pins: List<PinItem>,
+        tracks: List<TrackItem>
+    ): ByteArray {
+        val out = ByteArrayOutputStream((pins.size * 160 + tracks.size * 96 + 256).coerceAtMost(4 * 1024 * 1024))
+        val numBuf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+        fun putInt(v: Int) {
+            numBuf.clear(); numBuf.putInt(v); out.write(numBuf.array(), 0, 4)
+        }
+        fun putLong(v: Long) {
+            numBuf.clear(); numBuf.putLong(v); out.write(numBuf.array(), 0, 8)
+        }
+        fun putDouble(v: Double) {
+            numBuf.clear(); numBuf.putDouble(v); out.write(numBuf.array(), 0, 8)
+        }
+        fun putStr(s: String) {
+            val b = s.toByteArray(Charsets.UTF_8)
+            putInt(b.size)
+            if (b.isNotEmpty()) out.write(b)
+        }
+
+        putStr(exportTitle)
+        putInt(pins.size)
+        for (p in pins) {
+            val normStatus = PinStatus.fromRaw(p.status).key
+            putStr(p.name)
+            putStr(p.description)
+            putDouble(p.lat)
+            putDouble(p.lng)
+            putStr(normStatus)
+            putStr(statusLabel(normStatus))
+            putStr(p.issueReason)
+            out.write(if (p.isEdited) 1 else 0)
+            putStr(p.editedBy)
+            putLong(p.editedAt)
+            putStr(p.editHistory)
+            putStr(p.folderPath)
+        }
+        putInt(tracks.size)
+        for (t in tracks) {
+            putStr(t.name)
+            putStr(t.coords)
+            putStr(t.folderPath)
+        }
+        return out.toByteArray()
     }
 
     internal fun decodeRouteResult(payload: ByteArray, mode: TravelMode): Pair<NavRoute?, String?> {

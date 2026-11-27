@@ -184,8 +184,12 @@ class MapTileInterceptor(
         // Always serve from local PMTiles first across every zoom level (0.3ms, zero data)
         when (val local = LocalPmTilesStore.readTile(ctx, z, x, y)) {
             is LocalPmTilesStore.TileLookup.Found -> {
-                val raw = if (local.isGzipped) gunzipIfNeeded(local.bytes) else local.bytes
-                val patched = MvtKurdishPatcher.patchTile(raw)
+                val patched = if (local.alreadyPatched) {
+                    local.bytes
+                } else {
+                    val raw = if (local.isGzipped) gunzipIfNeeded(local.bytes) else local.bytes
+                    MvtKurdishPatcher.patchTile(raw)
+                }
                 return buildOkResponse(req, patched, PROTOBUF_MEDIA, "public, max-age=3600")
             }
             LocalPmTilesStore.TileLookup.EmptyInBounds -> {
@@ -205,8 +209,10 @@ class MapTileInterceptor(
             val mediaType = resp.body?.contentType() ?: PROTOBUF_MEDIA
             val bodyBytes = resp.body?.bytes()
             if (bodyBytes != null && bodyBytes.isNotEmpty()) {
-                val raw = gunzipIfNeeded(bodyBytes)
-                val patched = MvtKurdishPatcher.patchTile(raw)
+                val patched = RustCoreBridge.gunzipAndPatchMvt(bodyBytes)?.let { if (it.isEmpty()) bodyBytes else it } ?: run {
+                    val raw = gunzipIfNeeded(bodyBytes)
+                    MvtKurdishPatcher.patchTile(raw)
+                }
                 resp.newBuilder()
                     .removeHeader("Content-Encoding")
                     .removeHeader("Content-Length")

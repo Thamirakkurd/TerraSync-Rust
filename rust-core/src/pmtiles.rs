@@ -321,6 +321,50 @@ pub fn lookup_tile(
     Ok(arc.lookup(tile_id))
 }
 
+#[inline]
+pub fn is_gzip_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0x1F && bytes[1] == 0x8B
+}
+
+pub fn gunzip_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut gz = GzDecoder::new(bytes);
+    let mut out = Vec::with_capacity(bytes.len().saturating_mul(2));
+    gz.read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+/// Fused offline tile pipeline: PMTiles lookup -> GZIP inflate -> Kurdish MVT patch in one native call.
+pub fn lookup_and_patch_tile(
+    path: &str,
+    last_modified: i64,
+    file_size: i64,
+    tile_id: u64,
+    tile_is_gzipped: bool,
+) -> Result<Option<Vec<u8>>, ()> {
+    let arc = get_or_open(path, last_modified, file_size).ok_or(())?;
+    let Some(raw) = arc.lookup(tile_id) else {
+        return Ok(None);
+    };
+    let plain = if tile_is_gzipped || is_gzip_bytes(&raw) {
+        gunzip_bytes(&raw).unwrap_or(raw)
+    } else {
+        raw
+    };
+    let final_bytes = crate::mvt::patch_tile(&plain).unwrap_or(plain);
+    Ok(Some(final_bytes))
+}
+
+/// Fused online tile helper: inflates if gzipped, then patches Kurdish MVT labels.
+/// Returns `None` if input was neither gzipped nor modified (zero-copy passthrough).
+pub fn gunzip_and_patch_mvt(raw: &[u8]) -> Option<Vec<u8>> {
+    if is_gzip_bytes(raw) {
+        let plain = gunzip_bytes(raw)?;
+        Some(crate::mvt::patch_tile(&plain).unwrap_or(plain))
+    } else {
+        crate::mvt::patch_tile(raw)
+    }
+}
+
 pub fn evict_archive(path: &str) {
     if let Ok(mut cache) = archive_cache().lock() {
         cache.remove(path);

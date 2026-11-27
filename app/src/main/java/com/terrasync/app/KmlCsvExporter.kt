@@ -62,6 +62,7 @@ object KmlCsvExporter {
         pinsCopy: List<PinItem>,
         tracksCopy: List<TrackItem>
     ): String {
+        RustCoreBridge.buildKmlXml(exportTitle, pinsCopy, tracksCopy)?.let { return it }
         val sb = StringBuilder((pinsCopy.size * 420 + tracksCopy.size * 256 + 1024).coerceAtMost(8 * 1024 * 1024))
         sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
         sb.append("<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n<Document>\n")
@@ -189,7 +190,9 @@ object KmlCsvExporter {
                     safeFileName(layer.name)
                 }
                 val file = File(dir, "$baseName.kml")
-                file.writeText(buildKmlXml(exportTitle, pinsCopy, tracksCopy), Charsets.UTF_8)
+                if (!RustCoreBridge.exportKmlToFile(file, exportTitle, pinsCopy, tracksCopy)) {
+                    file.writeText(buildKmlXml(exportTitle, pinsCopy, tracksCopy), Charsets.UTF_8)
+                }
                 file to "Export KML: $exportTitle"
             }
             mainHandler.post {

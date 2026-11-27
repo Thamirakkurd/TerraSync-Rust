@@ -48,6 +48,41 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeParseKmlFile<
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeBuildKmlBytes<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let xml = crate::kml_export::build_kml_bytes(&bytes)?;
+        env.byte_array_from_slice(&xml).ok().map(|arr| arr.into_raw())
+    }));
+    match result {
+        Ok(Some(arr)) => arr,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeExportKmlFile<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    payload: JByteArray<'local>,
+    out_path: JString<'local>,
+) -> jboolean {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        let path_str: String = env.get_string(&out_path).ok()?.into();
+        Some(crate::kml_export::export_kml_to_file(&bytes, &path_str))
+    }));
+    match result {
+        Ok(Some(true)) => 1,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeRouteOffline<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
@@ -114,6 +149,23 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativePatchMvtKurdi
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeGunzipAndPatchMvt<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    raw_or_gz: JByteArray<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&raw_or_gz).ok()?;
+        let out_slice: Vec<u8> = crate::pmtiles::gunzip_and_patch_mvt(&bytes).unwrap_or_default();
+        env.byte_array_from_slice(&out_slice).ok().map(|arr| arr.into_raw())
+    }));
+    match result {
+        Ok(Some(arr)) => arr,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeWarmPmTiles<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
@@ -150,6 +202,38 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLookupPmTile<
             last_modified,
             file_size,
             tile_id as u64,
+        )
+        .ok()?;
+        let slice = bytes_opt.unwrap_or_default();
+        env.byte_array_from_slice(&slice).ok().map(|arr| arr.into_raw())
+    }));
+    match result {
+        Ok(Some(arr)) => arr,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLookupAndPatchPmTile<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+    last_modified: jlong,
+    file_size: jlong,
+    tile_id: jlong,
+    tile_is_gzipped: jboolean,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        if tile_id < 0 {
+            return None;
+        }
+        let path_str: String = env.get_string(&path).ok()?.into();
+        let bytes_opt = crate::pmtiles::lookup_and_patch_tile(
+            &path_str,
+            last_modified,
+            file_size,
+            tile_id as u64,
+            tile_is_gzipped != 0,
         )
         .ok()?;
         let slice = bytes_opt.unwrap_or_default();

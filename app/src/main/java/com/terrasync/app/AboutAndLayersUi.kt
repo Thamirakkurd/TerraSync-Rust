@@ -19,8 +19,8 @@ import android.widget.TextView
 import android.widget.Toast
 
 private const val GITHUB_PROFILE_URL = "https://github.com/Thamirakkurd"
-private const val GITHUB_REPO_URL = "https://github.com/Thamirakkurd/TerraSync"
-private const val GITHUB_RELEASES_URL = "https://github.com/Thamirakkurd/TerraSync/releases"
+private const val GITHUB_REPO_URL = "https://github.com/Thamirakkurd/TerraSync-Rust"
+private const val GITHUB_RELEASES_URL = "https://github.com/Thamirakkurd/TerraSync-Rust/releases"
 
 internal fun MainActivity.showMapLayersSheet() {
     val p = currentPalette()
@@ -306,14 +306,14 @@ internal fun MainActivity.buildAboutPage(): View {
     })
     val heroText = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
     heroText.addView(TextView(this).apply {
-        text = "TerraSync"
+        text = "TerraSync Rust"
         textSize = 22f
         letterSpacing = -0.01f
         setTextColor(txtPrimary)
         setTypeface(null, Typeface.BOLD)
     })
     heroText.addView(TextView(this).apply {
-        text = "Version ${getInstalledVersionName()} • Kotlin + MapLibre GL"
+        text = "Version ${getInstalledVersionName()} • " + if (RustCoreBridge.isAvailable()) "Rust Core + MapLibre GL" else "Kotlin + MapLibre GL"
         textSize = 12.5f
         setTextColor(p.green)
         setTypeface(null, Typeface.BOLD)
@@ -348,6 +348,13 @@ internal fun MainActivity.buildAboutPage(): View {
         text = "Device Stamp: ${DevicePrefs.getDeviceStamp(this@buildAboutPage)}"
         textSize = 12f
         setTextColor(txtSub)
+    })
+    devCard.addView(TextView(this).apply {
+        val rustLive = RustCoreBridge.isAvailable()
+        text = if (rustLive) "Native Engine: Rust Active (${RustCoreBridge.activeModulesSummary()})" else "Native Engine: Kotlin Fallback"
+        textSize = 12f
+        setTextColor(if (rustLive) p.green else txtSub)
+        setPadding(0, dp(4), 0, 0)
     })
     devCard.addView(TextView(this).apply {
         val fLabel = if (layers.size == 1) "folder" else "folders"
