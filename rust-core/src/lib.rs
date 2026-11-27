@@ -15,4 +15,5 @@ pub mod csv_export;
 pub mod contour_geo;
 pub mod audit;
 pub mod mvt_pins;
+pub mod mvt_tracks;
 pub mod jni_bridge;

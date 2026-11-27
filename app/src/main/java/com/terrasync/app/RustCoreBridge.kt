@@ -23,7 +23,7 @@ object RustCoreBridge {
     fun isAvailable(): Boolean = loaded
 
     fun activeModulesSummary(): String =
-        "KML/CSV, TSR1/Nav, MVT Pins & Kurdish, PMTiles v3, Contours, Search, Clusters, Lasso, Reports, Audit"
+        "KML/CSV, TSR1/Nav, MVT Pins+Tracks & Kurdish, PMTiles v3, Contours, Search, Clusters, Lasso, Reports, Audit"
 
     @JvmStatic private external fun nativePing(): Int
     @JvmStatic private external fun nativeDecodePolyline6(encoded: String): ByteArray?
@@ -60,6 +60,11 @@ object RustCoreBridge {
     @JvmStatic private external fun nativeIsGeoPinsSynced(version: Long, expectedLen: Int): Boolean
     @JvmStatic private external fun nativeSetMvtPinsFilter(payload: ByteArray): Boolean
     @JvmStatic private external fun nativeRenderPinsMvtTile(z: Int, x: Int, y: Int): ByteArray?
+    @JvmStatic private external fun nativeLoadGeoTracks(version: Long, payload: ByteArray): Boolean
+    @JvmStatic private external fun nativeIsGeoTracksSynced(version: Long, expectedLen: Int): Boolean
+    @JvmStatic private external fun nativeClearGeoTracks()
+    @JvmStatic private external fun nativeFilterDirtyMvtTiles(version: Long, packedTiles: LongArray): LongArray?
+    @JvmStatic private external fun nativeComputeResidentBounds(version: Long, pinsLen: Int, tracksLen: Int, layerId: String): ByteArray?
     @JvmStatic private external fun nativePatchGeoPins(oldVersion: Long, newVersion: Long, expectedLen: Int, payload: ByteArray): Boolean
     @JvmStatic private external fun nativeBuildPinsGeoJsonViewport(version: Long, expectedLen: Int, filterPayload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeClearGeoPins()
@@ -310,7 +315,7 @@ object RustCoreBridge {
 
     fun clearGeoPinsCache() {
         if (!loaded) return
-        runCatching { nativeClearGeoPins() }
+        runCatching { nativeClearGeoPins(); nativeClearGeoTracks() }
     }
 
     fun buildTracksGeoJsonViewport(
@@ -927,5 +932,55 @@ object RustCoreBridge {
     fun renderPinsMvtTile(z: Int, x: Int, y: Int): ByteArray {
         if (!loaded) return ByteArray(0)
         return runCatching { nativeRenderPinsMvtTile(z, x, y) }.getOrNull() ?: ByteArray(0)
+    }
+
+    fun ensureGeoTracksSynced(version: Long, tracks: List<TrackItem>): Boolean {
+        if (!loaded) return false
+        val already = runCatching { nativeIsGeoTracksSynced(version, tracks.size) }.getOrDefault(false)
+        if (already) return true
+        return runCatching {
+            val out = ByteArrayOutputStream((tracks.size * 256 + 32).coerceAtMost(8 * 1024 * 1024))
+            val nb = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+            putInt(tracks.size)
+            for (t in tracks) {
+                putStr(t.layerId)
+                putStr(t.coords)
+            }
+            nativeLoadGeoTracks(version, out.toByteArray())
+        }.getOrDefault(false)
+    }
+
+    fun filterDirtyMvtTiles(version: Long, packedTiles: LongArray): LongArray? {
+        if (!loaded || packedTiles.isEmpty()) return null
+        return runCatching { nativeFilterDirtyMvtTiles(version, packedTiles) }.getOrNull()
+    }
+
+    fun computeResidentBounds(
+        version: Long,
+        pinsLen: Int,
+        tracksLen: Int,
+        layerId: String = ""
+    ): List<org.maplibre.android.geometry.LatLng>? {
+        if (!loaded) return null
+        return runCatching {
+            val res = nativeComputeResidentBounds(version, pinsLen, tracksLen, layerId) ?: return@runCatching null
+            val bb = ByteBuffer.wrap(res).order(ByteOrder.LITTLE_ENDIAN)
+            val cnt = bb.int
+            if (cnt <= 0) return@runCatching emptyList()
+            val minLat = bb.double
+            val minLng = bb.double
+            val maxLat = bb.double
+            val maxLng = bb.double
+            if (cnt == 1 || (maxLat - minLat < 1e-7 && maxLng - minLng < 1e-7)) {
+                listOf(org.maplibre.android.geometry.LatLng(minLat, minLng))
+            } else {
+                listOf(
+                    org.maplibre.android.geometry.LatLng(minLat, minLng),
+                    org.maplibre.android.geometry.LatLng(maxLat, maxLng)
+                )
+            }
+        }.getOrNull()
     }
 }

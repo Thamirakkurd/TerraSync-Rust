@@ -409,6 +409,104 @@ mod tests {
     }
 
     #[test]
+    fn bench_wave11_mvt_tracks_and_delta() {
+        let put_s = |b: &mut Vec<u8>, s: &str| {
+            b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            b.extend_from_slice(s.as_bytes());
+        };
+        // Load 20,000 pins
+        let mut p_load = Vec::with_capacity(20_000 * 64);
+        put_s(&mut p_load, "pin-done");
+        put_s(&mut p_load, "pin-issue");
+        put_s(&mut p_load, "pin-pending");
+        p_load.extend_from_slice(&20_000u32.to_le_bytes());
+        for i in 0..20_000usize {
+            put_s(&mut p_load, &format!("id-{i}"));
+            put_s(&mut p_load, "layer1");
+            put_s(&mut p_load, &format!("MTR-{i:05} ئاکرێ"));
+            p_load.push((i % 3) as u8);
+            p_load.extend_from_slice(&(43.85_f64 + (i / 200) as f64 * 0.001).to_le_bytes());
+            p_load.extend_from_slice(&(36.70_f64 + (i % 200) as f64 * 0.001).to_le_bytes());
+        }
+        assert!(crate::geojson::load_geo_pins(2000, &p_load));
+
+        // Load 200 diagonal tracks (100 vertices each = 20,000 track vertices)
+        let mut t_load = Vec::with_capacity(200 * 2400);
+        t_load.extend_from_slice(&200u32.to_le_bytes());
+        for t in 0..200usize {
+            put_s(&mut t_load, "layer1");
+            let mut cs = String::with_capacity(2000);
+            for v in 0..100usize {
+                if v > 0 { cs.push(';'); }
+                let lng = 43.85 + (t as f64) * 0.0005 + (v as f64) * 0.0005;
+                let lat = 36.70 + (v as f64) * 0.001;
+                cs.push_str(&format!("{lng:.5},{lat:.5}"));
+            }
+            put_s(&mut t_load, &cs);
+        }
+        let t0 = Instant::now();
+        assert!(crate::mvt_tracks::load_geo_tracks(2000, &t_load));
+        let trk_load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let mut flt = vec![0b111u8, 0u8, 1u8];
+        flt.extend_from_slice(&0u32.to_le_bytes());
+        flt.extend_from_slice(&0u32.to_le_bytes());
+        assert!(crate::mvt_pins::set_mvt_filter(&flt));
+
+        let (mx, my) = crate::geojson::lng_lat_to_mercator_unit(43.90, 36.75);
+        let z = 13;
+        let n = (1 << z) as f64;
+        let cx = (mx * n).floor() as i32;
+        let cy = (my * n).floor() as i32;
+
+        // Render 9 combined pins+tracks MVT tiles
+        let t1 = Instant::now();
+        let mut total_bytes = 0usize;
+        let mut tracked = Vec::with_capacity(49);
+        for dx in -3..=3 {
+            for dy in -3..=3 {
+                let tx = cx + dx;
+                let ty = cy + dy;
+                tracked.push(((z as i64) << 48) | ((tx as i64) << 24) | (ty as i64));
+                if dx.abs() <= 1 && dy.abs() <= 1 {
+                    total_bytes += crate::mvt_pins::render_pins_mvt_tile(z, tx, ty).len();
+                }
+            }
+        }
+        let combined_9tiles_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        // Patch 1 pin & filter 49 tracked tiles -> should only dirty 1-2 tiles
+        let mut delta = Vec::new();
+        delta.extend_from_slice(&1u32.to_le_bytes());
+        put_s(&mut delta, "id-10050");
+        put_s(&mut delta, "layer1");
+        put_s(&mut delta, "MTR-10050 ئاکرێ");
+        delta.push(0u8);
+        delta.extend_from_slice(&43.90_f64.to_le_bytes());
+        delta.extend_from_slice(&36.75_f64.to_le_bytes());
+        assert!(crate::geojson::patch_geo_pins(2000, 2001, 20_000, &delta));
+
+        let t2 = Instant::now();
+        let dirty = crate::mvt_pins::filter_dirty_mvt_tiles(2001, &tracked).unwrap();
+        let dirty_us = t2.elapsed().as_secs_f64() * 1_000_000.0;
+
+        // Resident bounds over 20k pins + 200 tracks
+        assert!(crate::mvt_tracks::load_geo_tracks(2001, &t_load));
+        let t3 = Instant::now();
+        let bounds = crate::mvt_tracks::compute_resident_bounds(2001, 20_000, 200, "").unwrap();
+        let bounds_us = t3.elapsed().as_secs_f64() * 1_000_000.0;
+        let b_cnt = u32::from_le_bytes(bounds[0..4].try_into().unwrap());
+
+        crate::geojson::clear_geo_pins();
+        crate::mvt_tracks::clear_geo_tracks();
+
+        println!(
+            "WAVE11_BENCH | tracks_load_20k_pts={:.2} ms | combined_9tiles={:.2} ms ({} KB) | dirty_tile_filter={:.1} us ({}/{} tiles) | bounds_40k={:.1} us ({} pts)",
+            trk_load_ms, combined_9tiles_ms, total_bytes / 1024, dirty_us, dirty.len(), tracked.len(), bounds_us, b_cnt
+        );
+    }
+
+    #[test]
     fn bench_native_engines() {
         // 1. KML parse + export benchmark (500 field pins)
         let mut kml = String::from(

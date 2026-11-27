@@ -24,7 +24,12 @@ pub(crate) struct CachedGeoPins {
     pub(crate) pins: Vec<GeoPin>,
     pub(crate) id_to_idx: HashMap<String, usize>,
     pub(crate) x_index: Vec<(f64, usize)>,
+    pub(crate) last_delta_version: i64,
+    pub(crate) last_delta_coords: Vec<(f64, f64)>,
 }
+
+#[cfg(test)]
+pub(crate) static TEST_CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 static GEO_PINS_CACHE: OnceLock<RwLock<Option<CachedGeoPins>>> = OnceLock::new();
 
@@ -194,6 +199,8 @@ pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
         pins,
         id_to_idx,
         x_index,
+        last_delta_version: -1,
+        last_delta_coords: Vec::new(),
     });
     true
 }
@@ -411,8 +418,12 @@ pub fn patch_geo_pins(
     }
 
     let mut coords_changed = false;
+    let mut dirty_coords = Vec::with_capacity(resolved.len() * 2);
     for (idx, layer_id, name, status_code, lng, lat) in resolved {
         let pin = &mut cached.pins[idx];
+        if pin.mx >= 0.0 && pin.my >= 0.0 {
+            dirty_coords.push((pin.mx, pin.my));
+        }
         if pin.layer_id != layer_id {
             pin.layer_id.clear();
             pin.layer_id.push_str(layer_id);
@@ -433,9 +444,14 @@ pub fn patch_geo_pins(
             };
             pin.mx = mx;
             pin.my = my;
+            if mx >= 0.0 && my >= 0.0 {
+                dirty_coords.push((mx, my));
+            }
             coords_changed = true;
         }
     }
+    cached.last_delta_version = new_version;
+    cached.last_delta_coords = dirty_coords;
     if coords_changed {
         cached.x_index = cached
             .pins
@@ -686,6 +702,7 @@ mod tests {
 
     #[test]
     fn culls_viewport_preserves_color_balance_and_raycasts_lasso() {
+        let _guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut load = Vec::new();
         put_str(&mut load, "pin-done");
         put_str(&mut load, "pin-issue");
@@ -753,6 +770,7 @@ mod tests {
 
     #[test]
     fn patches_single_pin_in_place_and_bumps_version() {
+        let _guard = TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut load = Vec::new();
         put_str(&mut load, "pin-done");
         put_str(&mut load, "pin-issue");

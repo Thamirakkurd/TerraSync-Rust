@@ -283,15 +283,10 @@ fn format_cluster_abbrev(count: u32) -> String {
 
 /// Renders a binary MVT v2.1 tile ("pins" layer) directly from the resident Rust pin store.
 /// Uses O(log N) binary search over Mercator X so each tile only visits pins inside its longitude band.
-pub fn render_pins_mvt_tile(z: i32, x: i32, y: i32) -> Vec<u8> {
-    if !(0..=22).contains(&z) {
+fn render_pins_layer_only(z: i32, x: i32, y: i32, flt: &ActiveMvtFilter) -> Vec<u8> {
+    if flt.status_mask == 0 {
         return Vec::new();
     }
-    let n_tiles = 1_i64 << z;
-    if x < 0 || y < 0 || (x as i64) >= n_tiles || (y as i64) >= n_tiles {
-        return Vec::new();
-    }
-
     let Ok(pins_guard) = cache_lock().read() else {
         return Vec::new();
     };
@@ -302,13 +297,7 @@ pub fn render_pins_mvt_tile(z: i32, x: i32, y: i32) -> Vec<u8> {
         return Vec::new();
     }
 
-    let Ok(flt) = filter_lock().read() else {
-        return Vec::new();
-    };
-    if flt.status_mask == 0 {
-        return Vec::new();
-    }
-
+    let n_tiles = 1_i64 << z;
     let n_f = n_tiles as f64;
     let tile_x0 = x as f64 / n_f;
     let tile_y0 = y as f64 / n_f;
@@ -357,10 +346,7 @@ pub fn render_pins_mvt_tile(z: i32, x: i32, y: i32) -> Vec<u8> {
         }
         let tx = ((p.mx - tile_x0) * n_f * MVT_EXTENT as f64).round() as i32;
         let ty = ((p.my - tile_y0) * n_f * MVT_EXTENT as f64).round() as i32;
-        if do_cluster && !(0..MVT_EXTENT).contains(&tx) {
-            continue;
-        }
-        if do_cluster && !(0..MVT_EXTENT).contains(&ty) {
+        if do_cluster && (!(0..MVT_EXTENT).contains(&tx) || !(0..MVT_EXTENT).contains(&ty)) {
             continue;
         }
         hits.push((idx, tx, ty));
@@ -380,7 +366,6 @@ pub fn render_pins_mvt_tile(z: i32, x: i32, y: i32) -> Vec<u8> {
     let v_pending_icon = builder.intern_str(&cached.pending_icon);
 
     if do_cluster {
-        // Spatial grid clustering inside the tile (~48px radius at 256px tile -> ~768 extent units)
         let cell_units = 768_i32;
         struct ClusterBin {
             count: u32,
@@ -452,9 +437,8 @@ pub fn render_pins_mvt_tile(z: i32, x: i32, y: i32) -> Vec<u8> {
         return builder.finish_tile("pins");
     }
 
-    // Unclustered mode: color-fair, Earth-locked tile-pixel deduplication only when tile is super dense below z=15
     let selected_hits: Vec<(usize, i32, i32)> = if z < 15 && hits.len() > 350 {
-        let cell_units = if z >= 13 { 144_i32 } else { 192_i32 }; // ~9-12px on 256px tile
+        let cell_units = if z >= 13 { 144_i32 } else { 192_i32 };
         let half = cell_units / 2;
         let mut cells: HashMap<(i32, i32), (usize, i32, i32, i32)> = HashMap::with_capacity(400);
         for &(idx, tx, ty) in &hits {
@@ -477,7 +461,6 @@ pub fn render_pins_mvt_tile(z: i32, x: i32, y: i32) -> Vec<u8> {
         hits
     };
 
-    // Stable draw order: Done -> Issue -> Pending
     let mut done = Vec::with_capacity(selected_hits.len() / 2);
     let mut issue = Vec::with_capacity(selected_hits.len() / 4);
     let mut pending = Vec::with_capacity(selected_hits.len() / 4);
@@ -515,6 +498,61 @@ pub fn render_pins_mvt_tile(z: i32, x: i32, y: i32) -> Vec<u8> {
     builder.finish_tile("pins")
 }
 
+/// Renders a combined binary MVT v2.1 tile containing both "pins" and "tracks" layers.
+pub fn render_pins_mvt_tile(z: i32, x: i32, y: i32) -> Vec<u8> {
+    if !(0..=22).contains(&z) {
+        return Vec::new();
+    }
+    let n_tiles = 1_i64 << z;
+    if x < 0 || y < 0 || (x as i64) >= n_tiles || (y as i64) >= n_tiles {
+        return Vec::new();
+    }
+    let Ok(flt) = filter_lock().read() else {
+        return Vec::new();
+    };
+    let mut tile = render_pins_layer_only(z, x, y, &flt);
+    crate::mvt_tracks::append_tracks_mvt_layer(z, x, y, &flt.hidden_layers, &mut tile);
+    tile
+}
+
+/// Filters tracked packed tiles ((z<<48)|(x<<24)|y) down to ONLY tiles touched by the last O(1) pin delta.
+/// Returns None if `version` was not a delta patch (caller falls back to invalidating all tracked tiles).
+pub fn filter_dirty_mvt_tiles(version: i64, packed_tiles: &[i64]) -> Option<Vec<i64>> {
+    let guard = cache_lock().read().ok()?;
+    let cached = guard.as_ref()?;
+    if cached.version != version || cached.last_delta_version != version || cached.last_delta_coords.is_empty() {
+        return None;
+    }
+
+    let buf_frac = (TILE_BUFFER_UNITS as f64 / MVT_EXTENT as f64) + 0.02;
+    let mut dirty = Vec::with_capacity(8);
+
+    for &k in packed_tiles {
+        let ku = k as u64;
+        let z = ((ku >> 48) & 0x3F) as i32;
+        if !(0..=22).contains(&z) {
+            continue;
+        }
+        let x = ((ku >> 24) & 0xFF_FFFF) as i32;
+        let y = (ku & 0xFF_FFFF) as i32;
+        let n_f = (1_i64 << z) as f64;
+        let tile_span = 1.0 / n_f;
+        let min_mx = (x as f64 / n_f) - tile_span * buf_frac;
+        let max_mx = ((x + 1) as f64 / n_f) + tile_span * buf_frac;
+        let min_my = (y as f64 / n_f) - tile_span * buf_frac;
+        let max_my = ((y + 1) as f64 / n_f) + tile_span * buf_frac;
+
+        let hit = cached
+            .last_delta_coords
+            .iter()
+            .any(|&(mx, my)| mx >= min_mx && mx <= max_mx && my >= min_my && my <= max_my);
+        if hit {
+            dirty.push(k);
+        }
+    }
+    Some(dirty)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +579,8 @@ mod tests {
 
     #[test]
     fn encodes_valid_mvt_v2_tile_for_akre_unclustered_and_clustered() {
+        let _guard = crate::geojson::TEST_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::mvt_tracks::clear_geo_tracks();
         let mut load = Vec::new();
         put_str(&mut load, "pin-done");
         put_str(&mut load, "pin-issue");

@@ -781,27 +781,65 @@ class MapToolsController(
     }
 
     fun collectLayerLatLngs(layerPins: List<PinItem>, layerTracks: List<TrackItem>): List<LatLng> {
-        val out = ArrayList<LatLng>(layerPins.size + layerTracks.size * 4)
-        layerPins.forEach { p ->
-            if (p.lat.isFinite() && p.lng.isFinite() && p.lat in -90.0..90.0 && p.lng in -180.0..180.0) {
-                out.add(LatLng(p.lat, p.lng))
-            }
-        }
-        layerTracks.forEach { t ->
-            t.coords.split(";").forEach { pair ->
-                val parts = pair.split(",")
-                if (parts.size >= 2) {
-                    val lng = parts[0].trim().toDoubleOrNull()
-                    val lat = parts[1].trim().toDoubleOrNull()
-                    if (lat != null && lng != null && lat.isFinite() && lng.isFinite() &&
-                        lat in -90.0..90.0 && lng in -180.0..180.0
-                    ) {
-                        out.add(LatLng(lat, lng))
-                    }
+        val snap = viewModel.folderSnapshot
+        if (RustCoreBridge.isAvailable()) {
+            if (layerPins === snap.pins && layerTracks === snap.tracks) {
+                RustCoreBridge.computeResidentBounds(snap.dataVersion, snap.pins.size, snap.tracks.size, "")?.let { return it }
+            } else if (layerPins.isNotEmpty() || layerTracks.isNotEmpty()) {
+                val singleLid = layerPins.firstOrNull()?.layerId ?: layerTracks.firstOrNull()?.layerId
+                if (singleLid != null &&
+                    layerPins.size == (snap.pinsByLayerId[singleLid]?.size ?: 0) &&
+                    layerTracks.size == (snap.tracksByLayerId[singleLid]?.size ?: 0) &&
+                    layerPins.all { it.layerId == singleLid } &&
+                    layerTracks.all { it.layerId == singleLid }
+                ) {
+                    RustCoreBridge.computeResidentBounds(snap.dataVersion, snap.pins.size, snap.tracks.size, singleLid)?.let { return it }
                 }
             }
         }
-        return out
+        var minLat = Double.POSITIVE_INFINITY
+        var maxLat = Double.NEGATIVE_INFINITY
+        var minLng = Double.POSITIVE_INFINITY
+        var maxLng = Double.NEGATIVE_INFINITY
+        var count = 0
+        for (p in layerPins) {
+            if (p.lat.isFinite() && p.lng.isFinite() && p.lat in -90.0..90.0 && p.lng in -180.0..180.0) {
+                if (p.lat < minLat) minLat = p.lat
+                if (p.lat > maxLat) maxLat = p.lat
+                if (p.lng < minLng) minLng = p.lng
+                if (p.lng > maxLng) maxLng = p.lng
+                count++
+            }
+        }
+        for (t in layerTracks) {
+            val raw = t.coords
+            var start = 0
+            val len = raw.length
+            while (start < len) {
+                val semi = raw.indexOf(';', start).let { if (it < 0) len else it }
+                val comma = raw.indexOf(',', start)
+                if (comma in (start + 1) until semi) {
+                    val lng = raw.substring(start, comma).trim().toDoubleOrNull()
+                    val lat = raw.substring(comma + 1, semi).trim().toDoubleOrNull()
+                    if (lat != null && lng != null && lat.isFinite() && lng.isFinite() &&
+                        lat in -90.0..90.0 && lng in -180.0..180.0
+                    ) {
+                        if (lat < minLat) minLat = lat
+                        if (lat > maxLat) maxLat = lat
+                        if (lng < minLng) minLng = lng
+                        if (lng > maxLng) maxLng = lng
+                        count++
+                    }
+                }
+                start = semi + 1
+            }
+        }
+        if (count == 0) return emptyList()
+        return if (count == 1 || (maxLat - minLat < 1e-7 && maxLng - minLng < 1e-7)) {
+            listOf(LatLng(minLat, minLng))
+        } else {
+            listOf(LatLng(minLat, minLng), LatLng(maxLat, maxLng))
+        }
     }
 
     fun zoomToKmlBounds(pts: List<LatLng>, layerIdToReveal: String? = null) {

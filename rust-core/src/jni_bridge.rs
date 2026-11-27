@@ -1,5 +1,5 @@
-use jni::objects::{JByteArray, JClass, JDoubleArray, JFloatArray, JIntArray, JString};
-use jni::sys::{jboolean, jbyteArray, jdouble, jfloatArray, jint, jlong, jsize};
+use jni::objects::{JByteArray, JClass, JDoubleArray, JFloatArray, JIntArray, JLongArray, JString};
+use jni::sys::{jboolean, jbyteArray, jdouble, jfloatArray, jint, jlong, jlongArray, jsize};
 use jni::JNIEnv;
 
 #[no_mangle]
@@ -604,5 +604,83 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeIsGeoPinsSync
     })
     .unwrap_or(false);
     if ok { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLoadGeoTracks<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    payload: JByteArray<'local>,
+) -> jboolean {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let bytes = env.convert_byte_array(&payload).ok()?;
+        Some(crate::mvt_tracks::load_geo_tracks(version, &bytes))
+    }));
+    match result { Ok(Some(true)) => 1, _ => 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeIsGeoTracksSynced(
+    _env: JNIEnv,
+    _class: JClass,
+    version: jlong,
+    expected_len: jint,
+) -> jboolean {
+    if expected_len < 0 { return 0; }
+    let ok = std::panic::catch_unwind(|| {
+        crate::mvt_tracks::is_geo_tracks_synced(version, expected_len as usize)
+    }).unwrap_or(false);
+    if ok { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeClearGeoTracks(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    let _ = std::panic::catch_unwind(crate::mvt_tracks::clear_geo_tracks);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeFilterDirtyMvtTiles<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    packed_tiles: JLongArray<'local>,
+) -> jlongArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let len = env.get_array_length(&packed_tiles).ok()? as usize;
+        let mut buf = vec![0i64; len];
+        env.get_long_array_region(&packed_tiles, 0, &mut buf).ok()?;
+        let dirty = crate::mvt_pins::filter_dirty_mvt_tiles(version, &buf)?;
+        let out = env.new_long_array(dirty.len() as jsize).ok()?;
+        env.set_long_array_region(&out, 0, &dirty).ok()?;
+        Some(out.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeComputeResidentBounds<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    pins_len: jint,
+    tracks_len: jint,
+    layer_id: JString<'local>,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        if pins_len < 0 || tracks_len < 0 { return None; }
+        let lid: String = env.get_string(&layer_id).ok()?.into();
+        let out = crate::mvt_tracks::compute_resident_bounds(
+            version,
+            pins_len as usize,
+            tracks_len as usize,
+            &lid,
+        )?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
 
