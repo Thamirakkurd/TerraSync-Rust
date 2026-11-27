@@ -25,6 +25,21 @@ object RustCoreBridge {
     @JvmStatic
     private external fun nativeParseKmlFile(path: String): ByteArray?
 
+    @JvmStatic
+    private external fun nativeRouteOffline(
+        tsrPath: String,
+        lastModified: Long,
+        fileSize: Long,
+        startLat: Double,
+        startLng: Double,
+        endLat: Double,
+        endLng: Double,
+        modeCode: Int
+    ): ByteArray?
+
+    @JvmStatic
+    private external fun nativeEvictRoadGraph(tsrPath: String)
+
     fun parseKml(memBytes: ByteArray?, tempFile: File?, layerId: String): ParsedKml? {
         if (!loaded) return null
         val encoded = runCatching {
@@ -35,6 +50,69 @@ object RustCoreBridge {
             }
         }.getOrNull() ?: return null
         return runCatching { decodeParsedKml(encoded, layerId) }.getOrNull()
+    }
+
+    fun routeOffline(
+        tsrFile: File,
+        startLat: Double,
+        startLng: Double,
+        endLat: Double,
+        endLng: Double,
+        mode: TravelMode
+    ): Pair<NavRoute?, String?>? {
+        if (!loaded || !tsrFile.exists()) return null
+        val modeCode = when (mode) {
+            TravelMode.CAR -> 0
+            TravelMode.BICYCLE -> 1
+            TravelMode.WALKING -> 2
+        }
+        val encoded = runCatching {
+            nativeRouteOffline(
+                tsrFile.absolutePath,
+                tsrFile.lastModified(),
+                tsrFile.length(),
+                startLat,
+                startLng,
+                endLat,
+                endLng,
+                modeCode
+            )
+        }.getOrNull() ?: return null
+        return runCatching { decodeRouteResult(encoded, mode) }.getOrNull()
+    }
+
+    fun evictRoadGraph(tsrPath: String) {
+        if (!loaded) return
+        runCatching { nativeEvictRoadGraph(tsrPath) }
+    }
+
+    internal fun decodeRouteResult(payload: ByteArray, mode: TravelMode): Pair<NavRoute?, String?> {
+        val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        val ok = buf.get().toInt() != 0
+        if (!ok) {
+            return null to readUtf8(buf)
+        }
+        val totalDist = buf.double
+        val totalDur = buf.double
+        val geomCount = buf.int.coerceAtLeast(0)
+        val geom = ArrayList<Pair<Double, Double>>(geomCount)
+        repeat(geomCount) {
+            val lng = buf.double
+            val lat = buf.double
+            geom.add(lng to lat)
+        }
+        val stepCount = buf.int.coerceAtLeast(0)
+        val steps = ArrayList<NavStep>(stepCount)
+        repeat(stepCount) {
+            val instruction = readUtf8(buf)
+            val arrow = readUtf8(buf)
+            val dist = buf.double
+            val lat = buf.double
+            val lng = buf.double
+            val cumDist = buf.double
+            steps.add(NavStep(instruction, arrow, dist, lat, lng, cumDist))
+        }
+        return NavRoute(geom, totalDist, totalDur, steps, mode, "Offline") to null
     }
 
     internal fun decodeParsedKml(payload: ByteArray, layerId: String): ParsedKml {
@@ -100,7 +178,7 @@ object RustCoreBridge {
     private fun readUtf8(buf: ByteBuffer): String {
         val len = buf.int
         if (len <= 0) return ""
-        require(len <= buf.remaining()) { "Truncated native KML buffer" }
+        require(len <= buf.remaining()) { "Truncated native buffer" }
         val bytes = ByteArray(len)
         buf.get(bytes)
         return String(bytes, Charsets.UTF_8)

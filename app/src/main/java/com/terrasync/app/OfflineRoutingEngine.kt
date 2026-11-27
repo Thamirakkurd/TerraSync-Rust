@@ -296,6 +296,7 @@ object OfflineRoutingEngine {
 
     fun deleteRegion(ctx: Context, fileName: String): Boolean {
         val f = File(dir(ctx), fileName)
+        RustCoreBridge.evictRoadGraph(f.absolutePath)
         headerCache.remove(fileName)
         synchronized(graphCacheLock) {
             graphCache.remove(fileName)
@@ -1455,6 +1456,13 @@ object OfflineRoutingEngine {
 
         var lastFailure = "Could not compute offline route"
         for (region in candidates) {
+            val tsrFile = File(dir(ctx), region.fileName)
+            val nativeRes = RustCoreBridge.routeOffline(tsrFile, startLat, startLng, endLat, endLng, mode)
+            if (nativeRes != null) {
+                if (nativeRes.first != null) return nativeRes
+                if (!nativeRes.second.isNullOrBlank()) lastFailure = nativeRes.second!!
+                continue
+            }
             val g = loadGraph(ctx, region.fileName) ?: continue
             val res = computeAStar(g, startLat, startLng, endLat, endLng, mode, modeFlag)
             if (res.first != null) return res
