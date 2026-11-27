@@ -1,5 +1,8 @@
 package com.terrasync.app
 
+import org.maplibre.geojson.Feature
+import org.maplibre.geojson.LineString
+import org.maplibre.geojson.Point
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -39,6 +42,34 @@ object RustCoreBridge {
 
     @JvmStatic
     private external fun nativeEvictRoadGraph(tsrPath: String)
+
+    @JvmStatic
+    private external fun nativePatchMvtKurdish(rawMvt: ByteArray): ByteArray?
+
+    @JvmStatic
+    private external fun nativeWarmPmTiles(path: String, lastModified: Long, fileSize: Long): Boolean
+
+    @JvmStatic
+    private external fun nativeLookupPmTile(
+        path: String,
+        lastModified: Long,
+        fileSize: Long,
+        tileId: Long
+    ): ByteArray?
+
+    @JvmStatic
+    private external fun nativeEvictPmTiles(path: String)
+
+    @JvmStatic
+    private external fun nativeExtractContours(
+        elev: FloatArray,
+        z: Int,
+        x: Int,
+        y: Int,
+        n: Int,
+        step: Int,
+        majorStep: Int
+    ): ByteArray?
 
     fun parseKml(memBytes: ByteArray?, tempFile: File?, layerId: String): ParsedKml? {
         if (!loaded) return null
@@ -84,6 +115,71 @@ object RustCoreBridge {
     fun evictRoadGraph(tsrPath: String) {
         if (!loaded) return
         runCatching { nativeEvictRoadGraph(tsrPath) }
+    }
+
+    /** Returns patched bytes, empty ByteArray if unmodified, or null if native is unavailable. */
+    fun patchMvtKurdish(rawMvt: ByteArray): ByteArray? {
+        if (!loaded) return null
+        return runCatching { nativePatchMvtKurdish(rawMvt) }.getOrNull()
+    }
+
+    fun warmPmTilesArchive(file: File): Boolean {
+        if (!loaded || !file.exists()) return false
+        return runCatching {
+            nativeWarmPmTiles(file.absolutePath, file.lastModified(), file.length())
+        }.getOrDefault(false)
+    }
+
+    /** Returns tile bytes, empty ByteArray on valid miss, or null if native failed/unavailable. */
+    fun lookupPmTile(file: File, tileId: Long): ByteArray? {
+        if (!loaded) return null
+        return runCatching {
+            nativeLookupPmTile(file.absolutePath, file.lastModified(), file.length(), tileId)
+        }.getOrNull()
+    }
+
+    fun evictPmTilesArchive(path: String) {
+        if (!loaded) return
+        runCatching { nativeEvictPmTiles(path) }
+    }
+
+    fun extractContours(
+        elev: FloatArray,
+        z: Int,
+        x: Int,
+        y: Int,
+        n: Int,
+        step: Int,
+        majorStep: Int,
+        out: MutableList<Feature>
+    ): Boolean {
+        if (!loaded) return false
+        val payload = runCatching {
+            nativeExtractContours(elev, z, x, y, n, step, majorStep)
+        }.getOrNull() ?: return false
+        return runCatching {
+            val buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+            val lineCount = buf.int.coerceAtLeast(0)
+            repeat(lineCount) {
+                val isMajor = buf.get().toInt() != 0
+                val level = buf.int
+                val ptCount = buf.int.coerceAtLeast(0)
+                val pts = ArrayList<Point>(ptCount)
+                repeat(ptCount) {
+                    val lng = buf.double
+                    val lat = buf.double
+                    pts.add(Point.fromLngLat(lng, lat))
+                }
+                if (pts.size >= 2) {
+                    val feature = Feature.fromGeometry(LineString.fromLngLats(pts)).apply {
+                        addBooleanProperty("isMajor", isMajor)
+                        addStringProperty("ele", level.toString())
+                    }
+                    out.add(feature)
+                }
+            }
+            true
+        }.getOrDefault(false)
     }
 
     internal fun decodeRouteResult(payload: ByteArray, mode: TravelMode): Pair<NavRoute?, String?> {

@@ -345,6 +345,9 @@ class ContourOverlayManager {
         majorStep: Int,
         out: MutableList<Feature>
     ) {
+        if (RustCoreBridge.extractContours(grid.elev, grid.z, grid.x, grid.y, grid.n, step, majorStep, out)) {
+            return
+        }
         val n = grid.n
         val stride = n + 1
         var minE = Float.POSITIVE_INFINITY

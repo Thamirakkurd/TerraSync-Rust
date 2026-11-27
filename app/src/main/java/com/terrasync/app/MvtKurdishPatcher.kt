@@ -35,6 +35,7 @@ object MvtKurdishPatcher {
 
     fun patchTile(rawMvt: ByteArray): ByteArray {
         if (rawMvt.size < 4 || !containsKurdishUtf8(rawMvt)) return rawMvt
+        RustCoreBridge.patchMvtKurdish(rawMvt)?.let { return if (it.isEmpty()) rawMvt else it }
         return runCatching { patchTileInternal(rawMvt) }.getOrDefault(rawMvt)
     }
 

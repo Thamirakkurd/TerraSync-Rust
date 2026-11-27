@@ -109,6 +109,7 @@ object LocalPmTilesStore {
         }
 
         fun lookupTile(tileId: Long): ByteArray? {
+            RustCoreBridge.lookupPmTile(file, tileId)?.let { return if (it.isEmpty()) null else it }
             var entries = rootEntries
             for (depth in 0..3) {
                 val entry = binarySearchEntry(entries, tileId) ?: return null
@@ -124,6 +125,7 @@ object LocalPmTilesStore {
         }
 
         fun closeQuietly() {
+            RustCoreBridge.evictPmTilesArchive(file.absolutePath)
             runCatching { channel.close() }
             runCatching { raf.close() }
         }
@@ -308,6 +310,9 @@ object LocalPmTilesStore {
         return try {
             raf = RandomAccessFile(file, "r")
             val ch = raf.channel
+            if (RustCoreBridge.warmPmTilesArchive(file)) {
+                return OpenArchive(packId, file, header, raf, ch, emptyList())
+            }
             val rootLen = header.rootDirLength.toInt()
             if (rootLen <= 0 || rootLen > 16 * 1024 * 1024) {
                 raf.close()
