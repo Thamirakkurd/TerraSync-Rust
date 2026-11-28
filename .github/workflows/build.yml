@@ -64,6 +64,14 @@ jobs:
             echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > app/release-keystore.p12
           fi
 
+      - name: Cache Robolectric Android SDKs
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-sdk-${{ runner.os }}-${{ hashFiles('app/build.gradle.kts') }}
+          restore-keys: |
+            robolectric-sdk-${{ runner.os }}-
+
       - name: Run Unit Tests (-Xmx128m Stress + Robolectric SQLite)
         run: |
           gradle testDebugUnitTest --tests "*TerraSyncCoreStressTest" -PunitTestMaxHeap=128m --no-daemon

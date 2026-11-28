@@ -97,6 +97,10 @@ android {
             isIncludeAndroidResources = true
             all {
                 it.maxHeapSize = (project.findProperty("unitTestMaxHeap") as String?) ?: "512m"
+                it.systemProperty(
+                    "robolectric.dependency.repo.url",
+                    "https://maven-central.storage-download.googleapis.com/maven2"
+                )
                 it.testLogging.showStandardStreams = true
                 it.testLogging.events(
                     org.gradle.api.tasks.testing.logging.TestLogEvent.PASSED,
