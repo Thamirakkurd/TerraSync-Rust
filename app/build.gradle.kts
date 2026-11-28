@@ -34,6 +34,9 @@ android {
             ?: (baseNum * 100 + preOffset)
         versionCode = computedCode
         versionName = tagVer
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     val relStoreFile = (project.findProperty("RELEASE_STORE_FILE") as String?)
