@@ -639,4 +639,96 @@ Done Note: Meter Linked</description><Point><coordinates>{:.5},{:.5},0</coordina
             kml_ms, kurdish_us, cold_route_ms, warm_route_ms
         );
     }
+
+    #[test]
+    fn bench_wave12_unified_search_20k() {
+        let _lock = crate::geojson::TEST_CACHE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::geojson::clear_geo_pins();
+
+        fn put_s(buf: &mut Vec<u8>, s: &str) {
+            buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            buf.extend_from_slice(s.as_bytes());
+        }
+
+        let n = 20_000usize;
+        let mut load = Vec::with_capacity(n * 96 + 256);
+        put_s(&mut load, "pin-done");
+        put_s(&mut load, "pin-issue");
+        put_s(&mut load, "pin-pending");
+        load.extend_from_slice(&(n as u32).to_le_bytes());
+        for i in 0..n {
+            put_s(&mut load, &format!("id-{i}"));
+            put_s(&mut load, if i % 2 == 0 { "f_akre" } else { "f_duhok" });
+            put_s(&mut load, &format!("MTR-{i} ئاکرێ"));
+            load.push((i % 3) as u8);
+            let lng = 43.85 + (i % 200) as f64 * 0.0005;
+            let lat = 36.70 + (i / 200) as f64 * 0.0005;
+            load.extend_from_slice(&lng.to_le_bytes());
+            load.extend_from_slice(&lat.to_le_bytes());
+        }
+        load.extend_from_slice(b"W12S");
+        load.extend_from_slice(&2u32.to_le_bytes());
+        put_s(&mut load, "f_akre");
+        put_s(&mut load, "Akre Feeder 12");
+        put_s(&mut load, "f_duhok");
+        put_s(&mut load, "Duhok Feeder 3");
+        for i in 0..n {
+            put_s(&mut load, &format!("pole-{}", i % 500));
+            put_s(&mut load, if i % 3 == 1 { "no bill" } else { "" });
+        }
+
+        let t0 = Instant::now();
+        assert!(crate::geojson::load_geo_pins(3000, &load));
+        let unified_load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let mut q = Vec::new();
+        q.extend_from_slice(&2u32.to_le_bytes());
+        put_s(&mut q, "akre");
+        put_s(&mut q, "pole-42");
+        q.push(1u8);
+        q.push(1u8);
+        q.extend_from_slice(&36.74_f64.to_le_bytes());
+        q.extend_from_slice(&43.89_f64.to_le_bytes());
+        q.push(1u8);
+
+        let t1 = Instant::now();
+        let res = crate::search::query_geo_pins(3000, n, &q).unwrap();
+        let query_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        let cnt = u32::from_le_bytes(res[0..4].try_into().unwrap());
+        assert!(cnt > 0);
+
+        let mut delta = Vec::new();
+        delta.extend_from_slice(&1u32.to_le_bytes());
+        put_s(&mut delta, "id-10050");
+        put_s(&mut delta, "f_akre");
+        put_s(&mut delta, "MTR-10050 ئاکرێ");
+        delta.push(1u8);
+        delta.extend_from_slice(&43.90_f64.to_le_bytes());
+        delta.extend_from_slice(&36.75_f64.to_le_bytes());
+        delta.extend_from_slice(b"W12S");
+        put_s(&mut delta, "pole-50");
+        put_s(&mut delta, "unique-wave12-reason");
+
+        let t2 = Instant::now();
+        assert!(crate::geojson::patch_geo_pins(3000, 3001, n, &delta));
+        let patch_us = t2.elapsed().as_secs_f64() * 1_000_000.0;
+
+        let mut q2 = Vec::new();
+        q2.extend_from_slice(&1u32.to_le_bytes());
+        put_s(&mut q2, "unique-wave12-reason");
+        q2.push(1u8);
+        q2.push(0u8);
+        q2.push(1u8);
+        let res2 = crate::search::query_geo_pins(3001, n, &q2).unwrap();
+        assert_eq!(u32::from_le_bytes(res2[0..4].try_into().unwrap()), 1);
+
+        crate::geojson::clear_geo_pins();
+        println!(
+            "WAVE12_BENCH | unified_load_20k={:.2} ms | search_20k={:.2} ms ({} hits) | delta_patch_1pin={:.1} us",
+            unified_load_ms, query_ms, cnt, patch_us
+        );
+    }
+
 }

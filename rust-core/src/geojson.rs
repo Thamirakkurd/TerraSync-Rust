@@ -14,6 +14,10 @@ pub(crate) struct GeoPin {
     pub(crate) lat: f64,
     pub(crate) mx: f64,
     pub(crate) my: f64,
+    pub(crate) description: String,
+    pub(crate) issue_reason: String,
+    pub(crate) search_blob: String,
+    pub(crate) coords_text: String,
 }
 
 pub(crate) struct CachedGeoPins {
@@ -26,6 +30,8 @@ pub(crate) struct CachedGeoPins {
     pub(crate) x_index: Vec<(f64, usize)>,
     pub(crate) last_delta_version: i64,
     pub(crate) last_delta_coords: Vec<(f64, f64)>,
+    pub(crate) folder_names: HashMap<String, String>,
+    pub(crate) has_folder_names: bool,
 }
 
 #[cfg(test)]
@@ -70,6 +76,59 @@ impl<'a> BinReader<'a> {
         let slice = self.buf.get(self.pos..self.pos + len)?;
         self.pos += len;
         std::str::from_utf8(slice).ok()
+    }
+
+    fn consume_magic(&mut self, magic: &[u8; 4]) -> bool {
+        if self.buf.get(self.pos..self.pos + 4) == Some(magic.as_slice()) {
+            self.pos += 4;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[inline]
+fn status_search_label(status_code: u8) -> &'static str {
+    match status_code {
+        0 => "done",
+        1 => "issue",
+        _ => "pending",
+    }
+}
+
+fn build_search_blob(
+    name: &str,
+    description: &str,
+    issue_reason: &str,
+    status_code: u8,
+    folder_name: &str,
+) -> String {
+    let st = status_search_label(status_code);
+    let mut s = String::with_capacity(
+        name.len() + description.len() + issue_reason.len() + st.len() + folder_name.len() + 8,
+    );
+    s.push_str(name);
+    s.push(' ');
+    if !description.trim().is_empty() {
+        s.push_str(description);
+        s.push(' ');
+    }
+    if !issue_reason.trim().is_empty() {
+        s.push_str(issue_reason);
+        s.push(' ');
+    }
+    s.push_str(st);
+    s.push(' ');
+    s.push_str(folder_name);
+    s.to_lowercase()
+}
+
+fn format_coords_text(lat: f64, lng: f64) -> String {
+    if lat.is_finite() && lng.is_finite() {
+        format!("{:.6}, {:.6}", lat, lng)
+    } else {
+        String::new()
     }
 }
 
@@ -178,8 +237,50 @@ pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
             lat,
             mx,
             my,
+            description: String::new(),
+            issue_reason: String::new(),
+            search_blob: String::new(),
+            coords_text: format_coords_text(lat, lng),
         });
     }
+
+    let mut folder_names: HashMap<String, String> = HashMap::new();
+    let mut has_folder_names = false;
+    if r.consume_magic(b"W12S") {
+        let Some(f_count) = r.read_u32().map(|v| v as usize) else {
+            return false;
+        };
+        folder_names.reserve(f_count.min(4096));
+        for _ in 0..f_count {
+            let (Some(fid), Some(fname)) = (r.read_str(), r.read_str()) else {
+                return false;
+            };
+            folder_names.insert(fid.to_owned(), fname.to_owned());
+        }
+        has_folder_names = !folder_names.is_empty();
+        for pin in &mut pins {
+            let (Some(desc), Some(reason)) = (r.read_str(), r.read_str()) else {
+                return false;
+            };
+            pin.description = desc.to_owned();
+            pin.issue_reason = reason.to_owned();
+        }
+    }
+
+    for pin in &mut pins {
+        let fname = folder_names
+            .get(pin.layer_id.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("Folder");
+        pin.search_blob = build_search_blob(
+            &pin.name,
+            &pin.description,
+            &pin.issue_reason,
+            pin.status_code,
+            fname,
+        );
+    }
+
     let mut x_index: Vec<(f64, usize)> = pins
         .iter()
         .enumerate()
@@ -201,6 +302,8 @@ pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
         x_index,
         last_delta_version: -1,
         last_delta_coords: Vec::new(),
+        folder_names,
+        has_folder_names,
     });
     true
 }
@@ -397,6 +500,17 @@ pub fn patch_geo_pins(
         };
         updates.push((id, layer_id, name, status_code, lng, lat));
     }
+    let mut search_meta: Option<Vec<(&str, &str)>> = None;
+    if r.consume_magic(b"W12S") {
+        let mut meta = Vec::with_capacity(updates.len());
+        for _ in 0..updates.len() {
+            let (Some(desc), Some(reason)) = (r.read_str(), r.read_str()) else {
+                return false;
+            };
+            meta.push((desc, reason));
+        }
+        search_meta = Some(meta);
+    }
 
     let Ok(mut guard) = cache_lock().write() else {
         return false;
@@ -419,7 +533,7 @@ pub fn patch_geo_pins(
 
     let mut coords_changed = false;
     let mut dirty_coords = Vec::with_capacity(resolved.len() * 2);
-    for (idx, layer_id, name, status_code, lng, lat) in resolved {
+    for (i, (idx, layer_id, name, status_code, lng, lat)) in resolved.into_iter().enumerate() {
         let pin = &mut cached.pins[idx];
         if pin.mx >= 0.0 && pin.my >= 0.0 {
             dirty_coords.push((pin.mx, pin.my));
@@ -434,9 +548,33 @@ pub fn patch_geo_pins(
             pin.label_shaped = truncate_and_shape_label(name);
         }
         pin.status_code = status_code;
+        if let Some(ref meta) = search_meta {
+            let (desc, reason) = meta[i];
+            if pin.description != desc {
+                pin.description.clear();
+                pin.description.push_str(desc);
+            }
+            if pin.issue_reason != reason {
+                pin.issue_reason.clear();
+                pin.issue_reason.push_str(reason);
+            }
+        }
+        let fname = cached
+            .folder_names
+            .get(pin.layer_id.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("Folder");
+        pin.search_blob = build_search_blob(
+            &pin.name,
+            &pin.description,
+            &pin.issue_reason,
+            pin.status_code,
+            fname,
+        );
         if pin.lng != lng || pin.lat != lat {
             pin.lng = lng;
             pin.lat = lat;
+            pin.coords_text = format_coords_text(lat, lng);
             let (mx, my) = if lng.is_finite() && lat.is_finite() {
                 lng_lat_to_mercator_unit(lng, lat)
             } else {

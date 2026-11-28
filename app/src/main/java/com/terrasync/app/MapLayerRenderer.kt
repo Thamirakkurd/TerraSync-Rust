@@ -856,7 +856,8 @@ class MapLayerRenderer(
                 lastMvtFilterSignature = filterSig
                 lastTracksRenderKey = "${snap.dataVersion}|${hiddenLayerIds.hashCode()}|${hiddenLayerIds.size}"
                 AppExecutors.batchIoExecutor.execute {
-                    RustCoreBridge.ensureGeoPinsSynced(snap.dataVersion, pinsSnap)
+                    val folderNamesSnap = snap.layers.associate { it.id to it.name }
+                    RustCoreBridge.ensureGeoPinsSynced(snap.dataVersion, pinsSnap, folderNamesSnap)
                     RustCoreBridge.ensureGeoTracksSynced(snap.dataVersion, tracksSnap)
                     RustCoreBridge.setMvtPinsFilter(statusesSnap, clustered, showTitles, hiddenLayerIds, sentIds)
                     AppExecutors.postMain {

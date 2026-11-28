@@ -232,42 +232,25 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeExtractContou
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLoadSearchIndex<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    version: jlong,
-    payload: JByteArray<'local>,
-) -> jboolean {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let bytes = env.convert_byte_array(&payload).ok()?;
-        Some(crate::search::load_index(version, &bytes))
-    }));
-    match result { Ok(Some(true)) => 1, _ => 0 }
-}
-
-#[no_mangle]
 pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeQuerySearchIndex<'local>(
-    env: JNIEnv<'local>,
+    mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     version: jlong,
     expected_len: jint,
     query_payload: JByteArray<'local>,
 ) -> jbyteArray {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        if expected_len < 0 { return None; }
+    if expected_len < 0 {
+        return std::ptr::null_mut();
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let bytes = env.convert_byte_array(&query_payload).ok()?;
-        let out = crate::search::query_from_payload(version, expected_len as usize, &bytes)?;
+        let out = crate::search::query_geo_pins(version, expected_len as usize, &bytes)?;
         env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
     }));
-    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeClearSearchIndex(
-    _env: JNIEnv,
-    _class: JClass,
-) {
-    let _ = std::panic::catch_unwind(crate::search::clear_index);
+    match result {
+        Ok(Some(raw)) => raw,
+        _ => std::ptr::null_mut(),
+    }
 }
 
 #[no_mangle]

@@ -53,9 +53,7 @@ object RustCoreBridge {
     @JvmStatic private external fun nativeExtractContours(
         elev: FloatArray, z: Int, x: Int, y: Int, n: Int, step: Int, majorStep: Int
     ): ByteArray?
-    @JvmStatic private external fun nativeLoadSearchIndex(version: Long, payload: ByteArray): Boolean
     @JvmStatic private external fun nativeQuerySearchIndex(version: Long, expectedLen: Int, queryPayload: ByteArray): ByteArray?
-    @JvmStatic private external fun nativeClearSearchIndex()
     @JvmStatic private external fun nativeLoadGeoPins(version: Long, payload: ByteArray): Boolean
     @JvmStatic private external fun nativeIsGeoPinsSynced(version: Long, expectedLen: Int): Boolean
     @JvmStatic private external fun nativeSetMvtPinsFilter(payload: ByteArray): Boolean
@@ -173,31 +171,20 @@ object RustCoreBridge {
         }.getOrDefault(false)
     }
 
-    fun syncSearchIndex(version: Long, entries: List<SearchIndexEntry>): Boolean {
-        if (!loaded) return false
-        return runCatching {
-            val out = ByteArrayOutputStream((entries.size * 72 + 16).coerceAtMost(8 * 1024 * 1024))
-            val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
-            fun putDouble(v: Double) { nb.clear(); nb.putDouble(v); out.write(nb.array(), 0, 8) }
-            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
-            putInt(entries.size)
-            for (e in entries) {
-                putStr(e.searchBlob)
-                putStr(e.coordsText)
-                putDouble(e.pin.lat)
-                putDouble(e.pin.lng)
-            }
-            nativeLoadSearchIndex(version, out.toByteArray())
-        }.getOrDefault(false)
-    }
+    @Volatile private var lastSyncedFolderNames: Map<String, String> = emptyMap()
 
-    fun querySearchIndex(
-        version: Long, entries: List<SearchIndexEntry>, tokens: List<String>,
-        hasDigits: Boolean, hasLoc: Boolean, locLat: Double, locLng: Double
+    fun queryUnifiedPinSearch(
+        version: Long,
+        pins: List<PinItem>,
+        folderNames: Map<String, String>,
+        tokens: List<String>,
+        hasDigits: Boolean,
+        hasLoc: Boolean,
+        locLat: Double,
+        locLng: Double
     ): Pair<IntArray, DoubleArray?>? {
         if (!loaded) return null
-        if (tokens.isEmpty() || entries.isEmpty()) return IntArray(0) to null
+        if (tokens.isEmpty() || pins.isEmpty()) return IntArray(0) to null
         return runCatching {
             val qOut = ByteArrayOutputStream(128)
             val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
@@ -209,10 +196,11 @@ object RustCoreBridge {
             qOut.write(if (hasDigits) 1 else 0)
             qOut.write(if (hasLoc) 1 else 0)
             if (hasLoc) { putDouble(locLat); putDouble(locLng) }
+            qOut.write(if (folderNames.isNotEmpty()) 1 else 0)
             val qBytes = qOut.toByteArray()
-            val resBytes = nativeQuerySearchIndex(version, entries.size, qBytes) ?: run {
-                if (!syncSearchIndex(version, entries)) return@runCatching null
-                nativeQuerySearchIndex(version, entries.size, qBytes) ?: return@runCatching null
+            val resBytes = nativeQuerySearchIndex(version, pins.size, qBytes) ?: run {
+                if (!syncGeoPins(version, pins, folderNames)) return@runCatching null
+                nativeQuerySearchIndex(version, pins.size, qBytes) ?: return@runCatching null
             }
             val bb = ByteBuffer.wrap(resBytes).order(ByteOrder.LITTLE_ENDIAN)
             val count = bb.int.coerceAtLeast(0)
@@ -227,15 +215,20 @@ object RustCoreBridge {
         }.getOrNull()
     }
 
-    fun clearSearchIndex() {
-        if (!loaded) return
-        runCatching { nativeClearSearchIndex() }
-    }
-
-    fun syncGeoPins(version: Long, pins: List<PinItem>): Boolean {
+    fun syncGeoPins(
+        version: Long,
+        pins: List<PinItem>,
+        folderNames: Map<String, String> = emptyMap()
+    ): Boolean {
         if (!loaded) return false
+        val effectiveFolders = if (folderNames.isNotEmpty()) {
+            lastSyncedFolderNames = folderNames
+            folderNames
+        } else {
+            lastSyncedFolderNames
+        }
         return runCatching {
-            val out = ByteArrayOutputStream((pins.size * 72 + 64).coerceAtMost(8 * 1024 * 1024))
+            val out = ByteArrayOutputStream((pins.size * 96 + effectiveFolders.size * 32 + 64).coerceAtMost(8 * 1024 * 1024))
             val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
             fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
             fun putDouble(v: Double) { nb.clear(); nb.putDouble(v); out.write(nb.array(), 0, 8) }
@@ -256,6 +249,16 @@ object RustCoreBridge {
                 out.write(code)
                 putDouble(p.lng)
                 putDouble(p.lat)
+            }
+            out.write(byteArrayOf('W'.code.toByte(), '1'.code.toByte(), '2'.code.toByte(), 'S'.code.toByte()))
+            putInt(effectiveFolders.size)
+            for ((fid, fname) in effectiveFolders) {
+                putStr(fid)
+                putStr(fname)
+            }
+            for (p in pins) {
+                putStr(p.description)
+                putStr(p.issueReason)
             }
             nativeLoadGeoPins(version, out.toByteArray())
         }.getOrDefault(false)
@@ -890,15 +893,30 @@ object RustCoreBridge {
                 putDouble(p.lng)
                 putDouble(p.lat)
             }
+            out.write(byteArrayOf('W'.code.toByte(), '1'.code.toByte(), '2'.code.toByte(), 'S'.code.toByte()))
+            for (p in updatedPins) {
+                putStr(p.description)
+                putStr(p.issueReason)
+            }
             nativePatchGeoPins(oldVersion, newVersion, expectedLen, out.toByteArray())
         }.getOrDefault(false)
     }
 
-    fun ensureGeoPinsSynced(version: Long, pins: List<PinItem>): Boolean {
+    fun ensureGeoPinsSynced(
+        version: Long,
+        pins: List<PinItem>,
+        folderNames: Map<String, String> = emptyMap()
+    ): Boolean {
         if (!loaded) return false
-        val already = runCatching { nativeIsGeoPinsSynced(version, pins.size) }.getOrDefault(false)
-        if (already) return true
-        return syncGeoPins(version, pins)
+        val needsFolderRefresh = folderNames.isNotEmpty() && lastSyncedFolderNames.isEmpty()
+        if (folderNames.isNotEmpty()) {
+            lastSyncedFolderNames = folderNames
+        }
+        if (!needsFolderRefresh) {
+            val already = runCatching { nativeIsGeoPinsSynced(version, pins.size) }.getOrDefault(false)
+            if (already) return true
+        }
+        return syncGeoPins(version, pins, folderNames)
     }
 
     fun setMvtPinsFilter(

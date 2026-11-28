@@ -326,8 +326,7 @@ class BookmarksPageController(
                 val loc = gpsController.currentLocation
                 val unit = getCachedSpeedUnit()
                 AppExecutors.uiQueryExecutor.execute {
-                    val index = searchController.getOrBuildSearchIndex(ver, pinsSnap, folderNameById)
-                    val matches = searchController.filterSearchEntries(index, tokens, hasDigits, loc, unit)
+                    val matches = searchController.searchPinsUnified(ver, pinsSnap, folderNameById, tokens, hasDigits, loc, unit)
                     val rows = ArrayList<SearchRowItem>(matches.size + 2).apply {
                         add(SearchRowItem.Header("${matches.size} match${if (matches.size == 1) "" else "es"} across all folders"))
                         if (matches.isEmpty()) {

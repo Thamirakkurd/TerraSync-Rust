@@ -383,69 +383,50 @@ class SearchController(
     private val getMapCenter: () -> LatLng?
 ) {
 
-    @Volatile private var cachedSearchIndex: Pair<Long, List<SearchIndexEntry>>? = null
-    private val searchIndexLock = Any()
     private var webSearchSeq = 0
+    private val doneDotColor by lazy { Color.parseColor(PinStatus.DONE.colorHex) }
+    private val issueDotColor by lazy { Color.parseColor(PinStatus.ISSUE.colorHex) }
+    private val pendingDotColor by lazy { Color.parseColor(PinStatus.PENDING.colorHex) }
 
-    fun getOrBuildSearchIndex(
-        ver: Long,
-        pinsSnap: List<PinItem>,
-        folderNames: Map<String, String>
-    ): List<SearchIndexEntry> {
-        cachedSearchIndex?.let { if (it.first == ver) return it.second }
-        return synchronized(searchIndexLock) {
-            cachedSearchIndex?.let { if (it.first == ver) return it.second }
-            val built = pinsSnap.map { pin ->
-                val fName = folderNames[pin.layerId] ?: "Folder"
-                val st = PinStatus.fromRaw(pin.status)
-                val cleanNote = DailyReportGenerator.flattenSingleLine(pin.issueReason)
-                val statusTag = if ((st == PinStatus.ISSUE || st == PinStatus.DONE) && cleanNote.isNotBlank()) {
-                    "${st.label}: $cleanNote"
-                } else {
-                    st.label
-                }
-                val dotColor = Color.parseColor(st.colorHex)
-                val blob = buildString(
-                    pin.name.length + pin.description.length + pin.issueReason.length + st.label.length + fName.length + 8
-                ) {
-                    append(pin.name).append(' ')
-                    if (pin.description.isNotBlank()) append(pin.description).append(' ')
-                    if (pin.issueReason.isNotBlank()) append(pin.issueReason).append(' ')
-                    append(st.label).append(' ').append(fName)
-                }.lowercase(Locale.ROOT)
-                val coordsText = "${"%.6f".format(Locale.US, pin.lat)}, ${"%.6f".format(Locale.US, pin.lng)}"
-                SearchIndexEntry(
-                    pin = pin,
-                    searchBlob = blob,
-                    folderName = fName,
-                    statusTag = statusTag,
-                    dotColor = dotColor,
-                    coordsText = coordsText
-                )
-            }
-            cachedSearchIndex = ver to built
-            RustCoreBridge.syncSearchIndex(ver, built)
-            built
+    private fun buildSearchEntry(pin: PinItem, folderNames: Map<String, String>): SearchIndexEntry {
+        val fName = folderNames[pin.layerId] ?: "Folder"
+        val st = PinStatus.fromRaw(pin.status)
+        val cleanNote = DailyReportGenerator.flattenSingleLine(pin.issueReason)
+        val statusTag = if ((st == PinStatus.ISSUE || st == PinStatus.DONE) && cleanNote.isNotBlank()) {
+            "${st.label}: $cleanNote"
+        } else {
+            st.label
         }
+        val dotColor = when (st) {
+            PinStatus.DONE -> doneDotColor
+            PinStatus.ISSUE -> issueDotColor
+            PinStatus.PENDING -> pendingDotColor
+        }
+        val coordsText = "${"%.6f".format(Locale.US, pin.lat)}, ${"%.6f".format(Locale.US, pin.lng)}"
+        return SearchIndexEntry(
+            pin = pin,
+            searchBlob = "",
+            folderName = fName,
+            statusTag = statusTag,
+            dotColor = dotColor,
+            coordsText = coordsText
+        )
     }
 
-    fun filterSearchEntries(
-        index: List<SearchIndexEntry>,
+    fun searchPinsUnified(
+        ver: Long,
+        pinsSnap: List<PinItem>,
+        folderNames: Map<String, String>,
         tokens: List<String>,
         hasDigits: Boolean,
         loc: Location?,
         unit: SpeedUnit
     ): List<Pair<SearchIndexEntry, String?>> {
-        if (tokens.isEmpty()) return emptyList()
-        val snap = cachedSearchIndex
-        val indexVer = if (snap != null && snap.second === index) {
-            snap.first
-        } else {
-            System.identityHashCode(index).toLong()
-        }
-        val nativeRes = RustCoreBridge.querySearchIndex(
-            version = indexVer,
-            entries = index,
+        if (tokens.isEmpty() || pinsSnap.isEmpty()) return emptyList()
+        val nativeRes = RustCoreBridge.queryUnifiedPinSearch(
+            version = ver,
+            pins = pinsSnap,
+            folderNames = folderNames,
             tokens = tokens,
             hasDigits = hasDigits,
             hasLoc = loc != null,
@@ -456,28 +437,42 @@ class SearchController(
             val (indices, dists) = nativeRes
             val out = ArrayList<Pair<SearchIndexEntry, String?>>(indices.size)
             for (i in indices.indices) {
-                val entry = index.getOrNull(indices[i]) ?: continue
+                val pin = pinsSnap.getOrNull(indices[i]) ?: continue
+                val entry = buildSearchEntry(pin, folderNames)
                 val distText = if (dists != null) formatDistanceShort(dists[i], unit) else null
                 out.add(entry to distText)
             }
             return out
         }
-        val matched = index.filter { entry ->
-            tokens.all { tok ->
-                tok in entry.searchBlob || (hasDigits && tok in entry.coordsText)
-            }
-        }
-        return matched.map { entry ->
-            val dist = if (loc != null) {
-                formatDistanceShort(
-                    RoutingEngine.haversineMeters(loc.latitude, loc.longitude, entry.pin.lat, entry.pin.lng),
-                    unit
-                )
+        val out = ArrayList<Pair<SearchIndexEntry, String?>>()
+        for (pin in pinsSnap) {
+            val fName = folderNames[pin.layerId] ?: "Folder"
+            val st = PinStatus.fromRaw(pin.status)
+            val blob = buildString(
+                pin.name.length + pin.description.length + pin.issueReason.length + st.label.length + fName.length + 8
+            ) {
+                append(pin.name).append(' ')
+                if (pin.description.isNotBlank()) append(pin.description).append(' ')
+                if (pin.issueReason.isNotBlank()) append(pin.issueReason).append(' ')
+                append(st.label).append(' ').append(fName)
+            }.lowercase(Locale.ROOT)
+            val coordsText = if (hasDigits) {
+                "${"%.6f".format(Locale.US, pin.lat)}, ${"%.6f".format(Locale.US, pin.lng)}"
             } else {
-                null
+                ""
             }
-            entry to dist
+            if (tokens.all { tok -> tok in blob || (hasDigits && tok in coordsText) }) {
+                val entry = buildSearchEntry(pin, folderNames)
+                val dist = if (loc != null) {
+                    formatDistanceShort(
+                        RoutingEngine.haversineMeters(loc.latitude, loc.longitude, pin.lat, pin.lng),
+                        unit
+                    )
+                } else null
+                out.add(entry to dist)
+            }
         }
+        return out
     }
 
     fun createSearchAdapter(
@@ -681,8 +676,7 @@ class SearchController(
                     if (lat in -90.0..90.0 && lng in -180.0..180.0) lat to lng else null
                 } else null
 
-                val index = getOrBuildSearchIndex(ver, pinsSnapshot, folderNameById)
-                val matches = filterSearchEntries(index, tokens, hasDigits, loc, unit)
+                val matches = searchPinsUnified(ver, pinsSnapshot, folderNameById, tokens, hasDigits, loc, unit)
                 val nextLocal = ArrayList<SearchRowItem>(matches.size + 3)
                 if (parsedCoord != null) {
                     nextLocal.add(SearchRowItem.CoordJump(parsedCoord.first, parsedCoord.second))
@@ -782,9 +776,5 @@ class SearchController(
     fun destroy() {
         webSearchSeq++
         RoutingEngine.cancelPendingSearch()
-        synchronized(searchIndexLock) {
-            cachedSearchIndex = null
-            RustCoreBridge.clearSearchIndex()
-        }
     }
 }
