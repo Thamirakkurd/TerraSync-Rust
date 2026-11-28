@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::io::Write;
 use std::sync::{OnceLock, RwLock};
 
@@ -150,6 +151,7 @@ pub(crate) fn lng_lat_to_mercator_unit(lng: f64, lat: f64) -> (f64, f64) {
     (mx, my)
 }
 
+#[cfg(test)]
 #[inline]
 fn web_mercator_px(lng: f64, lat: f64, world_px: f64) -> (f64, f64) {
     let x = ((lng + 180.0) / 360.0) * world_px;
@@ -170,6 +172,7 @@ fn truncate_and_shape_label(name: &str) -> String {
     }
 }
 
+#[cfg(test)]
 #[inline]
 fn push_json_str(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
@@ -310,6 +313,7 @@ pub fn load_geo_pins(version: i64, payload: &[u8]) -> bool {
 
 /// Viewport-culled, Earth-locked Web Mercator pixel-deduped GeoJSON builder.
 /// Preserves true green/orange/red color mix with zero pan flicker.
+#[cfg(test)]
 pub fn build_pins_geojson_viewport(
     version: i64,
     expected_len: usize,
@@ -621,6 +625,7 @@ pub fn clear_geo_pins() {
     }
 }
 
+#[cfg(test)]
 pub fn build_tracks_geojson_viewport(payload: &[u8]) -> Option<Vec<u8>> {
     let mut r = BinReader::new(payload);
     let use_viewport = r.read_u8()? != 0;

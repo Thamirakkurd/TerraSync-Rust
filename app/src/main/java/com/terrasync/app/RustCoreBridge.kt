@@ -66,9 +66,7 @@ object RustCoreBridge {
     @JvmStatic private external fun nativeFilterDirtyMvtTiles(version: Long, packedTiles: LongArray): LongArray?
     @JvmStatic private external fun nativeComputeResidentBounds(version: Long, pinsLen: Int, tracksLen: Int, layerId: String): ByteArray?
     @JvmStatic private external fun nativePatchGeoPins(oldVersion: Long, newVersion: Long, expectedLen: Int, payload: ByteArray): Boolean
-    @JvmStatic private external fun nativeBuildPinsGeoJsonViewport(version: Long, expectedLen: Int, filterPayload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeClearGeoPins()
-    @JvmStatic private external fun nativeBuildTracksGeoJsonViewport(payload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeFilterPinsInPolygon(version: Long, expectedLen: Int, payload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeAnalyzeSameCoordClusters(payload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeSortAndScorePins(payload: ByteArray): ByteArray?
@@ -329,98 +327,9 @@ object RustCoreBridge {
         }.getOrDefault(false)
     }
 
-    fun buildPinsGeoJsonViewport(
-        version: Long,
-        pins: List<PinItem>,
-        hiddenLayerIds: Set<String>,
-        sentIds: Set<String>,
-        visibleStatuses: Set<String>,
-        useViewport: Boolean,
-        south: Double,
-        west: Double,
-        north: Double,
-        east: Double,
-        zoom: Double,
-        clustered: Boolean,
-        maxUnclusteredPins: Int,
-        selectedPinId: String?
-    ): String? {
-        if (!loaded) return null
-        return runCatching {
-            val flt = ByteArrayOutputStream(128 + hiddenLayerIds.size * 24 + sentIds.size * 24)
-            val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-            fun putInt(v: Int) { nb.clear(); nb.putInt(v); flt.write(nb.array(), 0, 4) }
-            fun putDouble(v: Double) { nb.clear(); nb.putDouble(v); flt.write(nb.array(), 0, 8) }
-            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) flt.write(b) }
-
-            var mask = 0
-            if (PinStatus.DONE.key in visibleStatuses) mask = mask or 1
-            if (PinStatus.ISSUE.key in visibleStatuses) mask = mask or 2
-            if (PinStatus.PENDING.key in visibleStatuses) mask = mask or 4
-            flt.write(mask)
-            putInt(hiddenLayerIds.size)
-            for (id in hiddenLayerIds) putStr(id)
-            putInt(sentIds.size)
-            for (id in sentIds) putStr(id)
-            flt.write(if (useViewport) 1 else 0)
-            putDouble(south)
-            putDouble(west)
-            putDouble(north)
-            putDouble(east)
-            putDouble(zoom)
-            flt.write(if (clustered) 1 else 0)
-            putInt(maxUnclusteredPins.coerceAtLeast(0))
-            putStr(selectedPinId.orEmpty())
-            val fltBytes = flt.toByteArray()
-
-            val jsonBytes = nativeBuildPinsGeoJsonViewport(version, pins.size, fltBytes) ?: run {
-                if (!syncGeoPins(version, pins)) return@runCatching null
-                nativeBuildPinsGeoJsonViewport(version, pins.size, fltBytes) ?: return@runCatching null
-            }
-            String(jsonBytes, Charsets.UTF_8)
-        }.getOrNull()
-    }
-
     fun clearGeoPinsCache() {
         if (!loaded) return
         runCatching { nativeClearGeoPins(); nativeClearGeoTracks() }
-    }
-
-    fun buildTracksGeoJsonViewport(
-        tracks: List<TrackItem>,
-        hiddenLayerIds: Set<String>,
-        useViewport: Boolean,
-        south: Double,
-        west: Double,
-        north: Double,
-        east: Double,
-        zoom: Double
-    ): String? {
-        if (!loaded) return null
-        return runCatching {
-            val visible = ArrayList<TrackItem>(tracks.size)
-            for (t in tracks) {
-                if (t.layerId !in hiddenLayerIds) visible.add(t)
-            }
-            val out = ByteArrayOutputStream((visible.size * 256 + 64).coerceAtMost(4 * 1024 * 1024))
-            val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
-            fun putDouble(v: Double) { nb.clear(); nb.putDouble(v); out.write(nb.array(), 0, 8) }
-            out.write(if (useViewport) 1 else 0)
-            putDouble(south)
-            putDouble(west)
-            putDouble(north)
-            putDouble(east)
-            putDouble(zoom)
-            putInt(visible.size)
-            for (t in visible) {
-                val b = t.coords.toByteArray(Charsets.UTF_8)
-                putInt(b.size)
-                if (b.isNotEmpty()) out.write(b)
-            }
-            val jsonBytes = nativeBuildTracksGeoJsonViewport(out.toByteArray()) ?: return@runCatching null
-            String(jsonBytes, Charsets.UTF_8)
-        }.getOrNull()
     }
 
     fun filterPinsInGeoPolygon(

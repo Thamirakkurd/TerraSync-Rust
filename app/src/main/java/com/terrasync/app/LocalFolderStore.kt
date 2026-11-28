@@ -819,9 +819,17 @@ object LocalFolderStore {
         pin
     }
 
+    private fun replaceSinglePin(pins: List<PinItem>, targetId: String, replacement: PinItem): List<PinItem> {
+        val idx = pins.indexOfFirst { it.id == targetId }
+        if (idx < 0) return pins
+        val copy = ArrayList<PinItem>(pins)
+        copy[idx] = replacement
+        return copy
+    }
+
     fun updatePin(ctx: Context, pin: PinItem): PinItem = synchronized(lock) {
         val cur = loadAll(ctx)
-        cachedSnapshot = cur.copy(pins = cur.pins.map { if (it.id == pin.id) pin else it })
+        cachedSnapshot = cur.copy(pins = replaceSinglePin(cur.pins, pin.id, pin))
         persistSinglePinToDb(ctx, pin, "update_pin")
         pin
     }
@@ -851,7 +859,7 @@ object LocalFolderStore {
             editedAt = now,
             editHistory = history
         )
-        cachedSnapshot = cur.copy(pins = cur.pins.map { if (it.id == pin.id) updated else it })
+        cachedSnapshot = cur.copy(pins = replaceSinglePin(cur.pins, pin.id, updated))
         persistSinglePinToDb(ctx, updated, "update_pin_status")
         updated
     }
@@ -898,8 +906,14 @@ object LocalFolderStore {
     fun updatePinsBatch(ctx: Context, updatedPins: List<PinItem>): List<PinItem> = synchronized(lock) {
         if (updatedPins.isEmpty()) return emptyList()
         val cur = loadAll(ctx)
-        val byId = updatedPins.associateBy { it.id }
-        cachedSnapshot = cur.copy(pins = cur.pins.map { byId[it.id] ?: it })
+        val nextPins = if (updatedPins.size == 1) {
+            val single = updatedPins[0]
+            replaceSinglePin(cur.pins, single.id, single)
+        } else {
+            val byId = updatedPins.associateBy { it.id }
+            cur.pins.map { byId[it.id] ?: it }
+        }
+        cachedSnapshot = cur.copy(pins = nextPins)
         persistPinsBatchToDb(ctx, updatedPins.toList(), "update_pins_batch")
         updatedPins
     }
@@ -924,7 +938,7 @@ object LocalFolderStore {
             editedAt = now,
             editHistory = history
         )
-        cachedSnapshot = cur.copy(pins = cur.pins.map { if (it.id == pin.id) updated else it })
+        cachedSnapshot = cur.copy(pins = replaceSinglePin(cur.pins, pin.id, updated))
         persistSinglePinToDb(ctx, updated, "update_pin_text")
         updated
     }
@@ -945,7 +959,7 @@ object LocalFolderStore {
             editHistory = recomputed.editHistory
         )
         val cur = loadAll(ctx)
-        cachedSnapshot = cur.copy(pins = cur.pins.map { if (it.id == pin.id) updated else it })
+        cachedSnapshot = cur.copy(pins = replaceSinglePin(cur.pins, pin.id, updated))
         persistSinglePinToDb(ctx, updated, "delete_pin_history_entry")
         updated
     }
@@ -962,7 +976,7 @@ object LocalFolderStore {
             editHistory = ""
         )
         val cur = loadAll(ctx)
-        cachedSnapshot = cur.copy(pins = cur.pins.map { if (it.id == pin.id) updated else it })
+        cachedSnapshot = cur.copy(pins = replaceSinglePin(cur.pins, pin.id, updated))
         persistSinglePinToDb(ctx, updated, "reset_pin_status")
         updated
     }
@@ -971,7 +985,7 @@ object LocalFolderStore {
         val cur = loadAll(ctx)
         val now = System.currentTimeMillis()
         val restored = previousPin.copy(updatedAt = now)
-        cachedSnapshot = cur.copy(pins = cur.pins.map { if (it.id == previousPin.id) restored else it })
+        cachedSnapshot = cur.copy(pins = replaceSinglePin(cur.pins, previousPin.id, restored))
         persistSinglePinToDb(ctx, restored, "restore_pin_snapshot")
         restored
     }

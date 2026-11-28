@@ -311,22 +311,6 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLoadGeoPins<'
     match result { Ok(Some(true)) => 1, _ => 0 }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeBuildPinsGeoJsonViewport<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    version: jlong,
-    expected_len: jint,
-    filter_payload: JByteArray<'local>,
-) -> jbyteArray {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        if expected_len < 0 { return None; }
-        let bytes = env.convert_byte_array(&filter_payload).ok()?;
-        let json = crate::geojson::build_pins_geojson_viewport(version, expected_len as usize, &bytes)?;
-        env.byte_array_from_slice(&json).ok().map(|arr| arr.into_raw())
-    }));
-    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
-}
 
 #[no_mangle]
 pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeClearGeoPins(
@@ -336,19 +320,6 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeClearGeoPins(
     let _ = std::panic::catch_unwind(crate::geojson::clear_geo_pins);
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeBuildTracksGeoJsonViewport<'local>(
-    env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    payload: JByteArray<'local>,
-) -> jbyteArray {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let bytes = env.convert_byte_array(&payload).ok()?;
-        let json = crate::geojson::build_tracks_geojson_viewport(&bytes)?;
-        env.byte_array_from_slice(&json).ok().map(|arr| arr.into_raw())
-    }));
-    match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
-}
 
 #[no_mangle]
 pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeFilterPinsInPolygon<'local>(

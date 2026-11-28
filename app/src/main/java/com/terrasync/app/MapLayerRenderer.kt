@@ -868,42 +868,7 @@ class MapLayerRenderer(
                     }
                 }
             } else {
-            val selPinId = viewModel.selectedPinId
-            val capS = vpS; val capW = vpW; val capN = vpN; val capE = vpE
-            val capZoom = vpZoom; val capUseVp = validVp
             AppExecutors.batchIoExecutor.execute {
-                val nativePinsJson = RustCoreBridge.buildPinsGeoJsonViewport(
-                    version = snap.dataVersion,
-                    pins = pinsSnap,
-                    hiddenLayerIds = hiddenLayerIds,
-                    sentIds = sentIds,
-                    visibleStatuses = statusesSnap,
-                    useViewport = capUseVp,
-                    south = capS,
-                    west = capW,
-                    north = capN,
-                    east = capE,
-                    zoom = capZoom,
-                    clustered = clustered,
-                    maxUnclusteredPins = 2400,
-                    selectedPinId = selPinId
-                )
-                if (nativePinsJson != null) {
-                    val emptyJson = "{\"type\":\"FeatureCollection\",\"features\":[]}"
-                    AppExecutors.postMain {
-                        if (isActivityAlive() && seq == pinRenderSeq && map?.style === style && style.isFullyLoaded) {
-                            applyPinClusterModeVisibility(style, clustered, showTitles)
-                            if (clustered) {
-                                style.getSourceAs<GeoJsonSource>(PINS_CLUSTER_SOURCE)?.setGeoJson(nativePinsJson)
-                                style.getSourceAs<GeoJsonSource>(PINS_SOURCE)?.setGeoJson(emptyJson)
-                            } else {
-                                style.getSourceAs<GeoJsonSource>(PINS_SOURCE)?.setGeoJson(nativePinsJson)
-                                style.getSourceAs<GeoJsonSource>(PINS_CLUSTER_SOURCE)?.setGeoJson(emptyJson)
-                            }
-                        }
-                    }
-                    return@execute
-                }
 
                 val doneFeatures = ArrayList<Feature>(pinsSnap.size / 2)
                 val issueFeatures = ArrayList<Feature>(pinsSnap.size / 4)
@@ -955,27 +920,7 @@ class MapLayerRenderer(
             lastTracksRenderKey = tracksKey
             val seqT = ++trackRenderSeq
             val tracksSnap = snap.tracks
-            val capS = vpS; val capW = vpW; val capN = vpN; val capE = vpE
-            val capZoom = vpZoom; val capUseVp = validVp
             AppExecutors.batchIoExecutor.execute {
-                val nativeTracksJson = RustCoreBridge.buildTracksGeoJsonViewport(
-                    tracks = tracksSnap,
-                    hiddenLayerIds = hiddenLayerIds,
-                    useViewport = capUseVp,
-                    south = capS,
-                    west = capW,
-                    north = capN,
-                    east = capE,
-                    zoom = capZoom
-                )
-                if (nativeTracksJson != null) {
-                    AppExecutors.postMain {
-                        if (isActivityAlive() && seqT == trackRenderSeq && map?.style === style && style.isFullyLoaded) {
-                            style.getSourceAs<GeoJsonSource>(TRACKS_SOURCE)?.setGeoJson(nativeTracksJson)
-                        }
-                    }
-                    return@execute
-                }
                 val trackFeatures = ArrayList<Feature>(tracksSnap.size)
                 for (t in tracksSnap) {
                     if (t.layerId in hiddenLayerIds) continue
