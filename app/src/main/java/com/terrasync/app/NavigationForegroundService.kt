@@ -103,7 +103,7 @@ class NavigationForegroundService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             return NotificationCompat.Builder(ctx, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_nav_arrow)
+                .setSmallIcon(android.R.drawable.ic_menu_directions)
                 .setContentTitle(title.ifBlank { "TerraSync Navigation" })
                 .setContentText(body.ifBlank { "Turn-by-turn guidance active" })
                 .setOngoing(true)

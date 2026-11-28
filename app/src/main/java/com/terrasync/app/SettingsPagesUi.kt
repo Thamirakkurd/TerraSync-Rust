@@ -1652,13 +1652,12 @@ internal fun MainActivity.buildSettingsSubPage(section: SettingsSection): View {
             body.addView(aboutCard)
 
             val backupCard = DesignSystem.createGroupedCard(this, p, radiusDp = 16f, paddingHDp = 14, paddingVDp = 12).apply {
-                (layoutParams as? LinearLayout.LayoutParams)?.topMargin = dp(12)
-                    ?: run {
-                        layoutParams = LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ).apply { topMargin = dp(12) }
-                    }
+                val lp = (layoutParams as? LinearLayout.LayoutParams) ?: LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                lp.topMargin = dp(12)
+                layoutParams = lp
             }
             backupCard.addView(TextView(this).apply {
                 text = "Backup & Restore (.tsbackup)"

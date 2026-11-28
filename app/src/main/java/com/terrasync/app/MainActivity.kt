@@ -240,7 +240,7 @@ class MainActivity : AppCompatActivity() {
         AppExecutors.batchIoExecutor.execute {
             val res = BackupManager.exportToUri(applicationContext, uri, getInstalledVersionName())
             AppExecutors.postMain {
-                if (!isActivityAlive()) return@postMain
+                if (isFinishing || isDestroyed) return@postMain
                 res.onSuccess { s ->
                     Toast.makeText(
                         this,
@@ -261,7 +261,7 @@ class MainActivity : AppCompatActivity() {
         AppExecutors.batchIoExecutor.execute {
             val inspect = BackupManager.inspectBackupUri(applicationContext, uri)
             AppExecutors.postMain {
-                if (!isActivityAlive()) return@postMain
+                if (isFinishing || isDestroyed) return@postMain
                 inspect.onFailure { e ->
                     Toast.makeText(this, e.message ?: "Invalid backup file", Toast.LENGTH_LONG).show()
                 }.onSuccess { info ->
@@ -280,7 +280,7 @@ class MainActivity : AppCompatActivity() {
                                 AppExecutors.batchIoExecutor.execute {
                                     val res = BackupManager.restoreFromUri(applicationContext, uri)
                                     AppExecutors.postMain {
-                                        if (!isActivityAlive()) return@postMain
+                                        if (isFinishing || isDestroyed) return@postMain
                                         res.onSuccess { restored ->
                                             repository.refreshJoinedSync()
                                             repository.applyMergedFolders()

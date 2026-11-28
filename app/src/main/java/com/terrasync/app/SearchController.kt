@@ -629,7 +629,7 @@ class SearchController(
                         )
                     }
                 }
-                val coordMatch = Regex("(-?\d{1,2}\.\d{3,})\s*[,\s]+\s*(-?\d{1,3}\.\d{3,})").find(normalized)
+                val coordMatch = Regex("""(-?\d{1,2}\.\d{3,})\s*[,\s]+\s*(-?\d{1,3}\.\d{3,})""").find(normalized)
                 if (coordMatch != null) {
                     val lat = coordMatch.groupValues[1].toDoubleOrNull()
                     val lng = coordMatch.groupValues[2].toDoubleOrNull()
