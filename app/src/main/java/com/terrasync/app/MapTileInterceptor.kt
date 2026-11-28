@@ -103,7 +103,7 @@ class MapTileInterceptor(
 
         private fun writeFileAtomic(target: File, bytes: ByteArray) {
             runCatching {
-                val tmp = File(target.parentFile, "${target.name}.tmp")
+                val tmp = File(target.parentFile, "${target.name}.${Thread.currentThread().id}.${System.nanoTime()}.tmp")
                 tmp.writeBytes(bytes)
                 if (!tmp.renameTo(target)) {
                     tmp.copyTo(target, overwrite = true)
@@ -201,6 +201,10 @@ class MapTileInterceptor(
         }
 
         if (!online) {
+            val installedMaxZ = LocalPmTilesStore.getInstalledMaxZoom(ctx)
+            if (installedMaxZ != null && z > installedMaxZ) {
+                return buildOverzoomUnavailableResponse(req, PROTOBUF_MEDIA)
+            }
             return buildEmptyResponse(req, PROTOBUF_MEDIA)
         }
 
@@ -348,6 +352,17 @@ class MapTileInterceptor(
             .protocol(Protocol.HTTP_1_1)
             .code(204)
             .message("No Content")
+            .header("Cache-Control", "no-store")
+            .body(ByteArray(0).toResponseBody(mediaType))
+            .build()
+    }
+
+    private fun buildOverzoomUnavailableResponse(req: Request, mediaType: okhttp3.MediaType): Response {
+        return Response.Builder()
+            .request(req)
+            .protocol(Protocol.HTTP_1_1)
+            .code(503)
+            .message("Overzoom Offline")
             .header("Cache-Control", "no-store")
             .body(ByteArray(0).toResponseBody(mediaType))
             .build()

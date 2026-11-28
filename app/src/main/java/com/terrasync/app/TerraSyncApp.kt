@@ -16,6 +16,7 @@ class TerraSyncApp : Application() {
         val ver = BuildConfig.VERSION_NAME.trim().removePrefix("v").removePrefix("V").ifBlank { "3.13.6" }
         RoutingEngine.userAgent = "TerraSync/$ver (https://github.com/Thamirakkurd/TerraSync)"
         RoutingEngine.appContext = applicationContext
+        NetworkState.register(applicationContext)
 
         // Robolectric runs on the host JVM without Android native MapLibre .so binaries.
         if ("robolectric".equals(Build.FINGERPRINT, ignoreCase = true)) return

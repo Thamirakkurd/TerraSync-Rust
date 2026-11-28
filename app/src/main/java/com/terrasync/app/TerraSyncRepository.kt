@@ -120,6 +120,7 @@ class TerraSyncRepository(
     private val syncRepoDelegate = lazy { syncRepoOverride ?: SyncRepo(appContext) }
     val syncRepo: SyncRepo get() = syncRepoDelegate.value
     private val mergeIndexGeneration = AtomicInteger(0)
+    private val versionCounter = java.util.concurrent.atomic.AtomicLong(0L)
     private val pendingCallbacksLock = Any()
     private val pendingIndexedCallbacks = mutableListOf<(FolderIndexSnapshot) -> Unit>()
     private var isPreloadingLocal = false
@@ -196,7 +197,7 @@ class TerraSyncRepository(
         val mergedLayersRaw = cloudLayers + local.layers
         val mergedPins = cloudPins + local.pins
         val mergedTracks = cloudTracks + local.tracks
-        val nextVer = snapshot.dataVersion + 1L
+        val nextVer = versionCounter.incrementAndGet()
         val connectedSnap = liveConnected
 
         fun commitSnapshot(built: FolderIndexSnapshot) {
@@ -215,11 +216,16 @@ class TerraSyncRepository(
             if (deltaBatch.isNotEmpty() && built.pins.size == prevSnap.pins.size) {
                 RustCoreBridge.patchGeoPins(prevSnap.dataVersion, built.dataVersion, built.pins.size, deltaBatch)
             }
-            val joinedEmpty = DevicePrefs.getJoinedLayerIds(appContext).isEmpty()
-            if (built.layers.isNotEmpty() || connectedSnap || joinedEmpty) {
-                DevicePrefs.saveCachedLayerNames(appContext, built.layers.map { it.name })
-                if (connectedSnap || joinedEmpty) {
-                    DevicePrefs.prunePinReferencesKeeping(appContext, built.pinById.keys)
+            val isDeltaOnly = deltaBatch.isNotEmpty() &&
+                built.pins.size == prevSnap.pins.size &&
+                built.layers.size == prevSnap.layers.size
+            if (!isDeltaOnly) {
+                val joinedEmpty = DevicePrefs.getJoinedLayerIds(appContext).isEmpty()
+                if (built.layers.isNotEmpty() || connectedSnap || joinedEmpty) {
+                    DevicePrefs.saveCachedLayerNames(appContext, built.layers.map { it.name })
+                    if (connectedSnap || joinedEmpty) {
+                        DevicePrefs.prunePinReferencesKeeping(appContext, built.pinById.keys)
+                    }
                 }
             }
             val callbacksToNotify = synchronized(pendingCallbacksLock) {
@@ -234,8 +240,50 @@ class TerraSyncRepository(
             callbacksToNotify.forEach { it.invoke(built) }
         }
 
+        fun tryBuildDeltaSnapshot(): FolderIndexSnapshot? {
+            val prev = snapshot
+            if (prev.dataVersion <= 0L) return null
+            if (prev.pins.size != mergedPins.size ||
+                prev.layers.size != mergedLayersRaw.size ||
+                prev.tracks.size != mergedTracks.size ||
+                prev.isLiveConnected != connectedSnap
+            ) {
+                return null
+            }
+            val deltaMap: Map<String, PinItem> = synchronized(pendingCallbacksLock) {
+                if (pendingGeoDeltaInvalidated || pendingGeoDeltaPins.isEmpty()) emptyMap()
+                else LinkedHashMap(pendingGeoDeltaPins)
+            }
+            if (deltaMap.isEmpty()) return null
+            val touchedLayers = HashSet<String>(deltaMap.size)
+            for (p in deltaMap.values) {
+                val old = prev.pinById[p.id] ?: return null
+                if (old.layerId != p.layerId) return null
+                if (prev.stackedPinBuckets.isNotEmpty() && (old.lat != p.lat || old.lng != p.lng)) {
+                    return null
+                }
+                touchedLayers.add(p.layerId)
+            }
+            val nextPinById = HashMap<String, PinItem>(prev.pinById).apply { putAll(deltaMap) }
+            val nextPinsByLayer = HashMap<String, List<PinItem>>(prev.pinsByLayerId)
+            for (lid in touchedLayers) {
+                val oldList = prev.pinsByLayerId[lid] ?: return null
+                val updatedList = ArrayList<PinItem>(oldList.size)
+                for (item in oldList) {
+                    updatedList.add(deltaMap[item.id] ?: item)
+                }
+                nextPinsByLayer[lid] = updatedList
+            }
+            return prev.copy(
+                pins = mergedPins,
+                pinById = nextPinById,
+                pinsByLayerId = nextPinsByLayer,
+                dataVersion = nextVer
+            )
+        }
+
         if (mergedPins.size < 200) {
-            val built = buildFolderIndexSnapshot(
+            val built = tryBuildDeltaSnapshot() ?: buildFolderIndexSnapshot(
                 mergedLayers = mergedLayersRaw,
                 mergedPins = mergedPins,
                 mergedTracks = mergedTracks,
@@ -249,9 +297,8 @@ class TerraSyncRepository(
             }
             return
         }
-
         AppExecutors.uiQueryExecutor.execute {
-            val built = buildFolderIndexSnapshot(
+            val built = tryBuildDeltaSnapshot() ?: buildFolderIndexSnapshot(
                 mergedLayers = mergedLayersRaw,
                 mergedPins = mergedPins,
                 mergedTracks = mergedTracks,
@@ -320,8 +367,12 @@ class TerraSyncRepository(
     }
 
     fun applyOptimisticCloudPinUpdate(updated: PinItem) {
-        if (cloudPins.any { it.id == updated.id }) {
-            cloudPins = cloudPins.map { if (it.id == updated.id) updated else it }
+        val current = cloudPins
+        val idx = current.indexOfFirst { it.id == updated.id }
+        if (idx >= 0) {
+            val next = ArrayList<PinItem>(current)
+            next[idx] = updated
+            cloudPins = next
         }
         applyMergedFolders(deltaUpdatedPins = listOf(updated))
     }

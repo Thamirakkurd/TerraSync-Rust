@@ -167,6 +167,24 @@ class MapLayerRenderer(
         val provider = object : CustomVectorTileProvider {
             override suspend fun fetchTile(z: Int, x: Int, y: Int): TileData {
                 requestedMvtTiles.add(packTileKey(z, x, y))
+                if (requestedMvtTiles.size > 384) {
+                    val it = requestedMvtTiles.iterator()
+                    while (it.hasNext()) {
+                        val key = it.next()
+                        if (((key ushr 48) and 0x3FL).toInt() != z) {
+                            it.remove()
+                        }
+                    }
+                    if (requestedMvtTiles.size > 512) {
+                        val trimIt = requestedMvtTiles.iterator()
+                        var excess = requestedMvtTiles.size - 384
+                        while (excess > 0 && trimIt.hasNext()) {
+                            trimIt.next()
+                            trimIt.remove()
+                            excess--
+                        }
+                    }
+                }
                 return TileData.Mvt(RustCoreBridge.renderPinsMvtTile(z, x, y))
             }
         }
@@ -266,11 +284,12 @@ class MapLayerRenderer(
         styleLoadSeq++
         pulseAnimator?.cancel()
         pulseAnimator = null
+        cameraIdleMap?.removeOnCameraIdleListener(viewportIdleListener)
+        cameraIdleMap = null
+        mvtTileScope.cancel()
+        requestedMvtTiles.clear()
         synchronized(trackPointCache) {
             trackPointCache.clear()
-            mvtTileScope.cancel()
-        requestedMvtTiles.clear()
-        RustCoreBridge.clearGeoPinsCache()
         }
         map = null
     }

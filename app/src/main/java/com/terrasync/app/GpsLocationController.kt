@@ -290,6 +290,7 @@ class GpsLocationController(
             (movedMeters >= 0.35 || abs(deltaBearing) >= 1.5f)
         if (shouldAnimateGps) {
             val continuousMotion = (loc.hasSpeed() && loc.speed >= 1.5f) || movedMeters >= 2.5
+            var lastAnimEmitMs = 0L
             gpsAnim = ValueAnimator.ofFloat(0f, 1f).apply {
                 duration = if (continuousMotion) fixDeltaMs.coerceIn(420L, 1100L) else 450L
                 interpolator = if (continuousMotion) LinearInterpolator() else DecelerateInterpolator()
@@ -299,6 +300,11 @@ class GpsLocationController(
                         return@addUpdateListener
                     }
                     val t = anim.animatedValue as Float
+                    val nowAnim = SystemClock.elapsedRealtime()
+                    if (t < 0.999f && nowAnim - lastAnimEmitMs < 33L) {
+                        return@addUpdateListener
+                    }
+                    lastAnimEmitMs = nowAnim
                     displayedLat = prevLat + (loc.latitude - prevLat) * t
                     displayedLng = prevLng + (loc.longitude - prevLng) * t
                     displayedBearing = (prevBearing + deltaBearing * t + 360f) % 360f

@@ -7,14 +7,14 @@ pub fn trim_native_memory(aggressive: bool) -> u32 {
     if aggressive {
         crate::tsr_compiler::shrink_session_map();
     }
-    if purge_android_allocator() {
+    if purge_android_allocator(aggressive) {
         trimmed = trimmed.saturating_add(1);
     }
     trimmed
 }
 
 #[cfg(all(target_os = "android", target_pointer_width = "64"))]
-fn purge_android_allocator() -> bool {
+fn purge_android_allocator(aggressive: bool) -> bool {
     use std::ffi::{c_char, c_int, c_void};
 
     #[link(name = "dl")]
@@ -24,6 +24,7 @@ fn purge_android_allocator() -> bool {
 
     type MalloptFn = unsafe extern "C" fn(c_int, c_int) -> c_int;
     const M_PURGE: c_int = -101;
+    const M_PURGE_ALL: c_int = -104; // Android 14+ Bionic Scudo full purge
 
     unsafe {
         let sym = dlsym(std::ptr::null_mut(), b"mallopt\0".as_ptr() as *const c_char);
@@ -31,12 +32,15 @@ fn purge_android_allocator() -> bool {
             return false;
         }
         let mallopt: MalloptFn = std::mem::transmute(sym);
+        if aggressive && mallopt(M_PURGE_ALL, 0) != 0 {
+            return true;
+        }
         mallopt(M_PURGE, 0) != 0
     }
 }
 
 #[cfg(not(all(target_os = "android", target_pointer_width = "64")))]
-fn purge_android_allocator() -> bool {
+fn purge_android_allocator(_aggressive: bool) -> bool {
     false
 }
 
