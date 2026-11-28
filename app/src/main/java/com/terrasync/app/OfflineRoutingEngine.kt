@@ -603,7 +603,7 @@ object OfflineRoutingEngine {
         fun clearChunkNodes()
         fun counts(): Triple<Int, Int, Int>
         fun estimatedOutputBytes(): Long
-        override fun writeTsr(
+        fun writeTsr(
             partFile: File,
             outFile: File,
             regionName: String,
@@ -1004,7 +1004,7 @@ object OfflineRoutingEngine {
             return Triple(nodeCount, edgeCount, nameCount)
         }
 
-        fun writeTsr(
+        override fun writeTsr(
             partFile: File,
             outFile: File,
             regionName: String,
