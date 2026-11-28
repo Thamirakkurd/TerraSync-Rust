@@ -11,7 +11,7 @@ const FLAG_CAR: u8 = 1;
 const FLAG_BIKE: u8 = 2;
 const FLAG_WALK: u8 = 4;
 
-const MAX_CACHE_GRAPHS: usize = 2;
+const MAX_CACHE_GRAPHS: usize = 1;
 const MAX_NODES: usize = 20_000_000;
 const MAX_EDGES: usize = 60_000_000;
 const MAX_NAMES: usize = 10_000_000;
@@ -128,6 +128,16 @@ pub fn evict_graph(path: &str) {
     if let Ok(mut cache) = graph_cache().lock() {
         cache.retain(|e| e.path != path);
     }
+}
+
+pub fn trim_graph_cache(_aggressive: bool) -> usize {
+    if let Ok(mut cache) = graph_cache().lock() {
+        let n = cache.len();
+        cache.clear();
+        cache.shrink_to_fit();
+        return n;
+    }
+    0
 }
 
 #[derive(Default)]

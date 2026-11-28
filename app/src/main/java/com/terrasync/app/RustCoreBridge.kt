@@ -975,4 +975,66 @@ object RustCoreBridge {
             }
         }.getOrNull()
     }
+
+    private external fun nativeTsrCompilerCreate(): Long
+    private external fun nativeTsrCompilerIngestChunk(handle: Long, chunkPath: String): String?
+    private external fun nativeTsrCompilerCounts(handle: Long): IntArray?
+    private external fun nativeTsrCompilerWriteTsr(
+        handle: Long,
+        partPath: String,
+        outPath: String,
+        regionName: String,
+        sLat: Double,
+        wLng: Double,
+        nLat: Double,
+        eLng: Double,
+        now: Long
+    ): ByteArray?
+    private external fun nativeTsrCompilerDestroy(handle: Long)
+    private external fun nativeTrimNativeMemory(aggressive: Boolean): Int
+
+    fun tsrCompilerCreate(): Long = runCatching {
+        nativeTsrCompilerCreate()
+    }.getOrElse { -1L }
+
+    fun tsrCompilerIngestChunk(handle: Long, chunkPath: String): String? =
+        nativeTsrCompilerIngestChunk(handle, chunkPath)
+
+    fun tsrCompilerCounts(handle: Long): Triple<Int, Int, Int>? = runCatching {
+        val arr = nativeTsrCompilerCounts(handle) ?: return@runCatching null
+        if (arr.size < 3) return@runCatching null
+        Triple(arr[0], arr[1], arr[2])
+    }.getOrNull()
+
+    fun tsrCompilerWriteTsr(
+        handle: Long,
+        partPath: String,
+        outPath: String,
+        regionName: String,
+        sLat: Double,
+        wLng: Double,
+        nLat: Double,
+        eLng: Double,
+        now: Long
+    ): Pair<Long, String?> {
+        val raw = nativeTsrCompilerWriteTsr(
+            handle, partPath, outPath, regionName, sLat, wLng, nLat, eLng, now
+        ) ?: return 0L to "Native TSR writer returned null"
+        if (raw.isEmpty()) return 0L to "Empty TSR writer response"
+        return if (raw[0].toInt() == 1 && raw.size >= 9) {
+            val size = ByteBuffer.wrap(raw, 1, 8).order(ByteOrder.LITTLE_ENDIAN).long
+            size to null
+        } else {
+            val err = if (raw.size > 1) String(raw, 1, raw.size - 1, Charsets.UTF_8) else "TSR write failed"
+            0L to err
+        }
+    }
+
+    fun tsrCompilerDestroy(handle: Long) {
+        runCatching { nativeTsrCompilerDestroy(handle) }
+    }
+
+    fun trimNativeMemory(aggressive: Boolean = false): Int = runCatching {
+        nativeTrimNativeMemory(aggressive)
+    }.getOrDefault(0)
 }

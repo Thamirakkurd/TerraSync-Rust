@@ -682,3 +682,121 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeComputeReside
     match result { Ok(Some(arr)) => arr, _ => std::ptr::null_mut() }
 }
 
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeTsrCompilerCreate<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::tsr_compiler::create_session()
+    }));
+    result.unwrap_or(-1)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeTsrCompilerIngestChunk<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    chunk_path: JString<'local>,
+) -> jni::sys::jstring {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let path: String = match env.get_string(&chunk_path) {
+            Ok(s) => s.into(),
+            Err(_) => return env.new_string("Invalid chunk path").ok().map(|s| s.into_raw()),
+        };
+        match crate::tsr_compiler::ingest_chunk(handle, &path) {
+            Ok(()) => None,
+            Err(err) => env.new_string(err).ok().map(|s| s.into_raw()),
+        }
+    }));
+    match result {
+        Ok(Some(s)) => s,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeTsrCompilerCounts<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jni::sys::jintArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let (nodes, edges, names) = crate::tsr_compiler::counts(handle)?;
+        let arr = env.new_int_array(3).ok()?;
+        env.set_int_array_region(&arr, 0, &[nodes, edges, names]).ok()?;
+        Some(arr.into_raw())
+    }));
+    match result {
+        Ok(Some(arr)) => arr,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeTsrCompilerWriteTsr<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    part_path: JString<'local>,
+    out_path: JString<'local>,
+    region_name: JString<'local>,
+    s_lat: jni::sys::jdouble,
+    w_lng: jni::sys::jdouble,
+    n_lat: jni::sys::jdouble,
+    e_lng: jni::sys::jdouble,
+    now: jlong,
+) -> jbyteArray {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let part: String = env.get_string(&part_path).ok()?.into();
+        let out_p: String = env.get_string(&out_path).ok()?.into();
+        let name: String = env.get_string(&region_name).ok()?.into();
+        let payload = match crate::tsr_compiler::write_tsr(
+            handle, &part, &out_p, &name, s_lat, w_lng, n_lat, e_lng, now,
+        ) {
+            Ok(size) => {
+                let mut v = Vec::with_capacity(9);
+                v.push(1u8);
+                v.extend_from_slice(&(size as i64).to_le_bytes());
+                v
+            }
+            Err(err) => {
+                let b = err.as_bytes();
+                let mut v = Vec::with_capacity(1 + b.len());
+                v.push(0u8);
+                v.extend_from_slice(b);
+                v
+            }
+        };
+        env.byte_array_from_slice(&payload).ok().map(|arr| arr.into_raw())
+    }));
+    match result {
+        Ok(Some(arr)) => arr,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeTsrCompilerDestroy<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::tsr_compiler::destroy_session(handle);
+    }));
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeTrimNativeMemory<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    aggressive: jni::sys::jboolean,
+) -> jint {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::memory::trim_native_memory(aggressive != 0) as jint
+    }));
+    result.unwrap_or(0)
+}

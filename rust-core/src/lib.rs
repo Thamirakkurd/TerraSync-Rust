@@ -16,4 +16,6 @@ pub mod contour_geo;
 pub mod audit;
 pub mod mvt_pins;
 pub mod mvt_tracks;
+pub mod tsr_compiler;
+pub mod memory;
 pub mod jni_bridge;

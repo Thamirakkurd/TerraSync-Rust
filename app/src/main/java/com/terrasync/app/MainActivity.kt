@@ -2305,9 +2305,27 @@ class MainActivity : AppCompatActivity() {
         isActivityStarted = false
         LocalFolderStore.flushPendingWritesAsync(applicationContext)
         mapView.onStop()
+        RustCoreBridge.trimNativeMemory(aggressive = false)
         super.onStop()
     }
-    override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level == android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ||
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+        ) {
+            val aggressive = level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+                level >= android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE
+            RustCoreBridge.trimNativeMemory(aggressive = aggressive)
+            if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+                runCatching { mapView.onLowMemory() }
+            }
+        }
+    }
+    override fun onLowMemory() {
+        super.onLowMemory()
+        RustCoreBridge.trimNativeMemory(aggressive = true)
+        mapView.onLowMemory()
+    }
     override fun onDestroy() {
         liveBookmarksRefresh = null
         livePinListRefresh = null

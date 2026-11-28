@@ -47,6 +47,25 @@ fn archive_cache() -> &'static Mutex<HashMap<String, Arc<OpenPmArchive>>> {
     ARCHIVE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+pub fn trim_caches(aggressive: bool) -> usize {
+    let mut trimmed = 0usize;
+    if let Ok(mut map) = archive_cache().lock() {
+        for arch in map.values() {
+            if let Ok(mut lc) = arch.leaf_cache.lock() {
+                trimmed += lc.len();
+                lc.clear();
+                lc.shrink_to_fit();
+            }
+        }
+        if aggressive {
+            trimmed += map.len();
+            map.clear();
+            map.shrink_to_fit();
+        }
+    }
+    trimmed
+}
+
 #[cfg(unix)]
 fn read_exact_at(file: &File, offset: u64, len: usize) -> Option<Vec<u8>> {
     if len == 0 || len > MAX_SLICE_LEN {

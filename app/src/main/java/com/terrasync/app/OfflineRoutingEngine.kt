@@ -598,11 +598,121 @@ object OfflineRoutingEngine {
         downloadRoadGraphInternal(ctx, packId, regionName, minLat, minLng, maxLat, maxLng, onProgress, onDone)
     }
 
+    internal interface TsrCompilerBackend : AutoCloseable {
+        fun streamChunkIntoDb(chunkFile: File, chunkLabel: String, basePct: Int, chunkCount: Int)
+        fun clearChunkNodes()
+        fun counts(): Triple<Int, Int, Int>
+        fun estimatedOutputBytes(): Long
+        override fun writeTsr(
+            partFile: File,
+            outFile: File,
+            regionName: String,
+            sLat: Double,
+            wLng: Double,
+            nLat: Double,
+            eLng: Double,
+            now: Long,
+            nodeCount: Int,
+            edgeCount: Int,
+            nameCount: Int
+        ): OfflineRoadRegion
+    }
+
+    private class RustTsrStagingCompiler(
+        private var handle: Long,
+        private val checkCancelled: () -> Unit,
+        private val emitProgress: (String, Int, Boolean) -> Unit
+    ) : TsrCompilerBackend {
+        override fun streamChunkIntoDb(chunkFile: File, chunkLabel: String, basePct: Int, chunkCount: Int) {
+            checkCancelled()
+            emitProgress("Compiling roads ($chunkLabel)...", basePct + (50 / chunkCount), true)
+            val err = RustCoreBridge.tsrCompilerIngestChunk(handle, chunkFile.absolutePath)
+            checkCancelled()
+            if (err != null) {
+                throw IllegalStateException(err)
+            }
+            emitProgress("Compiled roads ($chunkLabel)...", basePct + (72 / chunkCount), false)
+        }
+
+        override fun clearChunkNodes() {
+            // Chunk node map is cleared automatically in Rust after each chunk
+        }
+
+        override fun counts(): Triple<Int, Int, Int> =
+            RustCoreBridge.tsrCompilerCounts(handle) ?: Triple(0, 0, 0)
+
+        override fun estimatedOutputBytes(): Long = 64L * 1024L * 1024L
+
+        override fun writeTsr(
+            partFile: File,
+            outFile: File,
+            regionName: String,
+            sLat: Double,
+            wLng: Double,
+            nLat: Double,
+            eLng: Double,
+            now: Long,
+            nodeCount: Int,
+            edgeCount: Int,
+            nameCount: Int
+        ): OfflineRoadRegion {
+            checkCancelled()
+            emitProgress("Saving offline road graph (92%)...", 92, true)
+            val (sizeBytes, err) = RustCoreBridge.tsrCompilerWriteTsr(
+                handle = handle,
+                partPath = partFile.absolutePath,
+                outPath = outFile.absolutePath,
+                regionName = regionName,
+                sLat = sLat,
+                wLng = wLng,
+                nLat = nLat,
+                eLng = eLng,
+                now = now
+            )
+            if (err != null) throw IllegalStateException(err)
+            checkCancelled()
+            return OfflineRoadRegion(
+                fileName = outFile.name,
+                name = regionName,
+                minLat = sLat,
+                minLng = wLng,
+                maxLat = nLat,
+                maxLng = eLng,
+                nodeCount = nodeCount,
+                edgeCount = edgeCount,
+                sizeBytes = if (sizeBytes > 0L) sizeBytes else outFile.length(),
+                downloadedAt = now
+            )
+        }
+
+        override fun close() {
+            val h = handle
+            if (h > 0L) {
+                handle = -1L
+                RustCoreBridge.tsrCompilerDestroy(h)
+                RustCoreBridge.trimNativeMemory(aggressive = false)
+            }
+        }
+    }
+
+    private fun openTsrCompiler(
+        stageDir: File,
+        checkCancelled: () -> Unit,
+        emitProgress: (String, Int, Boolean) -> Unit
+    ): TsrCompilerBackend {
+        val rustHandle = RustCoreBridge.tsrCompilerCreate()
+        return if (rustHandle > 0L) {
+            RustTsrStagingCompiler(rustHandle, checkCancelled, emitProgress)
+        } else {
+            RoadGraphStagingCompiler(stageDir, checkCancelled, emitProgress)
+        }
+    }
+
     internal class RoadGraphStagingCompiler(
         private val stageDir: File,
         private val checkCancelled: () -> Unit,
         private val emitProgress: (String, Int, Boolean) -> Unit
-    ) : AutoCloseable {
+    ) : TsrCompilerBackend {
         val stageDbFile = File(stageDir, "stage.db")
         private val db: SQLiteDatabase
         private val openStmts = ArrayList<SQLiteStatement>(5)
@@ -747,7 +857,7 @@ object OfflineRoutingEngine {
             }
         }
 
-        fun streamChunkIntoDb(chunkFile: File, chunkLabel: String, basePct: Int, chunkCount: Int) {
+        override fun streamChunkIntoDb(chunkFile: File, chunkLabel: String, basePct: Int, chunkCount: Int) {
             emitProgress("Indexing road nodes ($chunkLabel)...", basePct + (45 / chunkCount), true)
             var ops = 0
             var inTx = true
@@ -881,11 +991,13 @@ object OfflineRoutingEngine {
             }
         }
 
-        fun clearChunkNodes() {
+        override fun clearChunkNodes() {
             db.execSQL("DELETE FROM chunk_nodes")
         }
 
-        fun counts(): Triple<Int, Int, Int> {
+        override fun estimatedOutputBytes(): Long = stageDbFile.length() * 2L
+
+        override fun counts(): Triple<Int, Int, Int> {
             val nodeCount = db.rawQuery("SELECT COUNT(*) FROM nodes", null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
             val edgeCount = db.rawQuery("SELECT COUNT(*) FROM edges", null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
             val nameCount = db.rawQuery("SELECT COUNT(*) FROM names", null).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
@@ -1029,7 +1141,7 @@ object OfflineRoutingEngine {
         val partFile = File(dir(ctx), "$fileName.part")
         var finished = false
         try {
-            RoadGraphStagingCompiler(stageDir, checkCancelled) { _, _, _ -> }.use { compiler ->
+            openTsrCompiler(stageDir, checkCancelled) { _, _, _ -> }.use { compiler ->
                 val chunkCount = chunkFiles.size.coerceAtLeast(1)
                 for ((idx, chunkFile) in chunkFiles.withIndex()) {
                     checkCancelled()
@@ -1090,7 +1202,7 @@ object OfflineRoutingEngine {
         Thread {
             val stageDir = stagingDir(ctx, jobKey)
             var activePartFile: File? = null
-            var compiler: RoadGraphStagingCompiler? = null
+            var compiler: TsrCompilerBackend? = null
             var finishedCleanly = false
             var resultRegion: OfflineRoadRegion? = null
             var resultError: String? = null
@@ -1238,7 +1350,7 @@ object OfflineRoutingEngine {
                         "https://overpass.private.coffee/api/interpreter"
                     )
 
-                    val activeCompiler = RoadGraphStagingCompiler(stageDir, ::checkCancelled, ::emitProgress).also {
+                    val activeCompiler = openTsrCompiler(stageDir, ::checkCancelled, ::emitProgress).also {
                         compiler = it
                     }
 
@@ -1366,7 +1478,7 @@ object OfflineRoutingEngine {
 
                     if (!fetchedAny || nodeCount == 0 || edgeCount == 0) {
                         resultError = if (!fetchedAny) lastErr else "No routable roads found in this area"
-                    } else if (!hasEnoughStorage(ctx, maxOf(64L * 1024L * 1024L, activeCompiler.stageDbFile.length() * 2L))) {
+                    } else if (!hasEnoughStorage(ctx, maxOf(64L * 1024L * 1024L, activeCompiler.estimatedOutputBytes()))) {
                         resultError = "Not enough free storage to save offline road graph"
                     } else {
                         emitProgress("Saving offline roads ($nodeCount nodes)...", 85, force = true)
