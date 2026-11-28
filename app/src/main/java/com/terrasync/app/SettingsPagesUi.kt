@@ -1650,6 +1650,61 @@ internal fun MainActivity.buildSettingsSubPage(section: SettingsSection): View {
                 setOnClickListener { openFullPage(::buildAboutPage) }
             })
             body.addView(aboutCard)
+
+            val backupCard = DesignSystem.createGroupedCard(this, p, radiusDp = 16f, paddingHDp = 14, paddingVDp = 12).apply {
+                (layoutParams as? LinearLayout.LayoutParams)?.topMargin = dp(12)
+                    ?: run {
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { topMargin = dp(12) }
+                    }
+            }
+            backupCard.addView(TextView(this).apply {
+                text = "Backup & Restore (.tsbackup)"
+                textSize = 14f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(txtPrimary)
+            })
+            backupCard.addView(TextView(this).apply {
+                text = "Save or restore all local folders, pins, tracks, sent flags, and app settings in one file."
+                textSize = 12f
+                setTextColor(txtSub)
+                setPadding(0, dp(3), 0, dp(10))
+            })
+            val backupBtnRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            }
+            backupBtnRow.addView(MaterialButton(this).apply {
+                text = "Export Backup"
+                textSize = 13f
+                isAllCaps = false
+                insetTop = 0
+                insetBottom = 0
+                cornerRadius = dp(12)
+                layoutParams = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(8) }
+                DesignSystem.applyPrimaryCtaButton(this, p)
+                UiAnimations.attachSnappyPress(this)
+                setOnClickListener { launchExportBackup() }
+            })
+            backupBtnRow.addView(MaterialButton(this).apply {
+                text = "Restore Backup"
+                textSize = 13f
+                isAllCaps = false
+                insetTop = 0
+                insetBottom = 0
+                cornerRadius = dp(12)
+                layoutParams = LinearLayout.LayoutParams(0, dp(42), 1f)
+                DesignSystem.styleSegmentedButton(this, false, p, onTonalCard = true)
+                UiAnimations.attachSnappyPress(this)
+                setOnClickListener { launchRestoreBackup() }
+            })
+            backupCard.addView(backupBtnRow)
+            body.addView(backupCard)
         }
     }
 

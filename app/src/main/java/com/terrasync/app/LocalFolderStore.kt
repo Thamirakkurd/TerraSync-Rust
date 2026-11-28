@@ -190,6 +190,75 @@ object LocalFolderStore {
         cachedSnapshot = null
     }
 
+    fun exportDatabaseSnapshot(ctx: Context, destFile: File): Boolean {
+        val appCtx = ctx.applicationContext
+        drainPendingWritesIfNotOnIoThread()
+        return synchronized(diskLock) {
+            runCatching {
+                val db = writableDb(appCtx)
+                runCatching { db.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { it.moveToFirst() } }
+                if (destFile.exists()) destFile.delete()
+                val vacuumed = runCatching {
+                    val safePath = destFile.absolutePath.replace("'", "''")
+                    db.execSQL("VACUUM INTO '$safePath'")
+                    destFile.exists() && destFile.length() >= 100L
+                }.getOrDefault(false)
+                if (!vacuumed) {
+                    val dbFile = appCtx.getDatabasePath(DB_NAME)
+                    if (!dbFile.exists()) return@runCatching false
+                    dbFile.copyTo(destFile, overwrite = true)
+                }
+                destFile.exists() && destFile.length() >= 100L
+            }.getOrDefault(false)
+        }
+    }
+
+    fun restoreDatabaseSnapshot(ctx: Context, srcFile: File): Boolean {
+        val appCtx = ctx.applicationContext
+        if (!srcFile.exists() || srcFile.length() < 100L) return false
+        val valid = runCatching {
+            val hdr = ByteArray(16)
+            FileInputStream(srcFile).use { fis ->
+                if (fis.read(hdr) < 16) return@runCatching false
+            }
+            if (String(hdr, 0, 15, Charsets.US_ASCII) != "SQLite format 3") return@runCatching false
+            SQLiteDatabase.openDatabase(srcFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { checkDb ->
+                val tables = HashSet<String>()
+                checkDb.rawQuery("SELECT name FROM sqlite_master WHERE type='table'", null).use { c ->
+                    while (c.moveToNext()) tables.add(c.getString(0))
+                }
+                "local_layers" in tables && "local_pins" in tables && "local_tracks" in tables
+            }
+        }.getOrDefault(false)
+        if (!valid) return false
+
+        drainPendingWritesIfNotOnIoThread()
+        return synchronized(lock) {
+            synchronized(diskLock) {
+                runCatching {
+                    cachedSnapshot = null
+                    runCatching { dbHelper?.close() }
+                    dbHelper = null
+                    val dbFile = appCtx.getDatabasePath(DB_NAME)
+                    dbFile.parentFile?.mkdirs()
+                    listOf(
+                        File(dbFile.path + "-wal"),
+                        File(dbFile.path + "-shm"),
+                        File(dbFile.path + "-journal")
+                    ).forEach { runCatching { if (it.exists()) it.delete() } }
+                    val tmp = File(dbFile.parentFile, "${DB_NAME}.restore.tmp")
+                    srcFile.copyTo(tmp, overwrite = true)
+                    if (dbFile.exists()) dbFile.delete()
+                    if (!tmp.renameTo(dbFile)) {
+                        tmp.copyTo(dbFile, overwrite = true)
+                        tmp.delete()
+                    }
+                    true
+                }.getOrDefault(false)
+            }
+        }
+    }
+
     fun flushPendingWritesAsync(ctx: Context) {
         val appCtx = ctx.applicationContext
         ioExecutor.execute {

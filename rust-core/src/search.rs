@@ -60,14 +60,21 @@ fn haversine_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 pub fn query_geo_pins(version: i64, expected_len: usize, query_payload: &[u8]) -> Option<Vec<u8>> {
     let mut r = BinReader::new(query_payload);
     let token_count = r.read_u32()? as usize;
-    let mut tokens: Vec<&str> = Vec::with_capacity(token_count.min(64));
+    let mut tokens: Vec<String> = Vec::with_capacity(token_count.min(64));
+    let mut normalized_has_digits = false;
     for _ in 0..token_count {
         let t = r.read_str()?;
         if !t.is_empty() {
-            tokens.push(t);
+            let norm = crate::geojson::normalize_search_text(t);
+            if !norm.is_empty() {
+                if norm.bytes().any(|b| b.is_ascii_digit()) {
+                    normalized_has_digits = true;
+                }
+                tokens.push(norm);
+            }
         }
     }
-    let has_digits = r.read_u8()? != 0;
+    let has_digits = (r.read_u8()? != 0) || normalized_has_digits;
     let has_loc = r.read_u8()? != 0;
     let (loc_lat, loc_lng) = if has_loc {
         (r.read_f64()?, r.read_f64()?)
@@ -96,7 +103,7 @@ pub fn query_geo_pins(version: i64, expected_len: usize, query_payload: &[u8]) -
     for (idx, pin) in cached.pins.iter().enumerate() {
         let ok = tokens
             .iter()
-            .all(|&tok| pin.search_blob.contains(tok) || (has_digits && pin.coords_text.contains(tok)));
+            .all(|tok| pin.search_blob.contains(tok.as_str()) || (has_digits && pin.coords_text.contains(tok.as_str())));
         if ok {
             let d = if has_loc {
                 haversine_meters(loc_lat, loc_lng, pin.lat, pin.lng)
@@ -340,5 +347,14 @@ mod tests {
         // Stale version must miss cleanly
         assert!(query_geo_pins(42, 3, &q2).is_none());
         crate::geojson::clear_geo_pins();
+    }
+}
+
+#[cfg(test)]
+mod numeral_tests {
+    #[test]
+    fn test_arabic_and_kurdish_numerals_normalize_to_ascii() {
+        assert_eq!(crate::geojson::normalize_search_text("MTR-\u{0664}\u{0668}\u{0662}\u{0661}"), "mtr-4821");
+        assert_eq!(crate::geojson::normalize_search_text("Pole \u{06F0}\u{06F9}\u{06F5}"), "pole 095");
     }
 }

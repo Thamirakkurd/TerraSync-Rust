@@ -122,7 +122,22 @@ fn build_search_blob(
     s.push_str(st);
     s.push(' ');
     s.push_str(folder_name);
-    s.to_lowercase()
+    normalize_search_text(&s)
+}
+
+pub(crate) fn normalize_search_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        let mapped = match ch {
+            '\u{0660}'..='\u{0669}' => ((ch as u32 - 0x0660) as u8 + b'0') as char,
+            '\u{06F0}'..='\u{06F9}' => ((ch as u32 - 0x06F0) as u8 + b'0') as char,
+            _ => ch,
+        };
+        for lc in mapped.to_lowercase() {
+            out.push(lc);
+        }
+    }
+    out
 }
 
 fn format_coords_text(lat: f64, lng: f64) -> String {

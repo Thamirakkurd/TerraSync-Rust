@@ -520,6 +520,16 @@ class NavigationController(
         gpsController.syncGpsPollingProfile(forceRestart = true)
         gpsController.updateSpeedBadge(loc)
         renderer.renderRouteOverlay()
+        NavigationForegroundService.onStopRequested = {
+            if (isActivityAlive() && viewModel.activeNavRoute != null) {
+                stopNavigation()
+            }
+        }
+        NavigationForegroundService.start(
+            activity,
+            "Navigating to ${destTitle.ifBlank { "destination" }}",
+            "Turn-by-turn guidance active"
+        )
         updateNavigationProgress(loc, route, LatLng(destLat, destLng))
         moveCameraForNavigation(loc, 650)
     }
@@ -571,6 +581,9 @@ class NavigationController(
         tvNavEta.text = formatEtaDuration(etaSec)
         val modeTag = if (route.engineLabel.contains("Offline", ignoreCase = true)) "Offline" else "Online"
         tvNavMeta.text = "${formatDistanceShort(remainingRoadMeters, unit)} • $modeTag"
+        val navNotifTitle = if (isRerouting) "Rerouting..." else "${step.arrow} ${formatDistanceShort(distToStep, unit)} • $nextInstr"
+        val navNotifBody = "${formatEtaDuration(etaSec)} (${formatDistanceShort(remainingRoadMeters, unit)}) • ${viewModel.activeNavDestTitle.ifBlank { modeTag }}"
+        NavigationForegroundService.updateProgress(activity, navNotifTitle, navNotifBody)
 
         val speakDist = if (loc.hasSpeed() && loc.speed > 16f) 450.0 else 280.0
         if (!isRerouting && navCurrentStepIdx != lastSpokenStepIdx && distToStep < speakDist) {
@@ -646,6 +659,8 @@ class NavigationController(
     }
 
     fun stopNavigation() {
+        NavigationForegroundService.onStopRequested = null
+        NavigationForegroundService.stop(activity)
         routeRequestSeq++
         viewModel.stopNavigation()
         activeNavTrimmedGeom = null
@@ -677,6 +692,8 @@ class NavigationController(
     }
 
     fun destroy() {
+        NavigationForegroundService.onStopRequested = null
+        NavigationForegroundService.stop(activity)
         routeRequestSeq++
         pendingRouteReq = null
         tts?.stop()

@@ -588,7 +588,67 @@ class SearchController(
             UiAnimations.applyRowRipple(activity, this, night)
             setOnClickListener { etQuery.setText("") }
         }
+        val btnPasteJump = TextView(activity).apply {
+            text = "Paste"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(p.accentPrimary)
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(32)
+            ).apply { marginStart = dp(4) }
+            background = DesignSystem.buildOpaqueDrawable(
+                ctx = activity,
+                fillColor = p.surfaceFloating,
+                radiusDp = 16f,
+                strokeColor = p.borderSubtle,
+                strokeDp = 1f
+            )
+            clipToOutline = true
+            UiAnimations.attachSnappyPress(this, 0.94f)
+            setOnClickListener {
+                val cm = activity.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                val clip = cm?.primaryClip
+                val raw = if (clip != null && clip.itemCount > 0) {
+                    clip.getItemAt(0).coerceToText(activity)?.toString()?.trim().orEmpty()
+                } else ""
+                if (raw.isBlank()) {
+                    Toast.makeText(activity, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                val normalized = buildString(raw.length) {
+                    for (ch in raw) {
+                        append(
+                            when (ch) {
+                                in '\u0660'..'\u0669' -> ('0'.code + (ch.code - 0x0660)).toChar()
+                                in '\u06F0'..'\u06F9' -> ('0'.code + (ch.code - 0x06F0)).toChar()
+                                else -> ch
+                            }
+                        )
+                    }
+                }
+                val coordMatch = Regex("(-?\d{1,2}\.\d{3,})\s*[,\s]+\s*(-?\d{1,3}\.\d{3,})").find(normalized)
+                if (coordMatch != null) {
+                    val lat = coordMatch.groupValues[1].toDoubleOrNull()
+                    val lng = coordMatch.groupValues[2].toDoubleOrNull()
+                    if (lat != null && lng != null && lat in -90.0..90.0 && lng in -180.0..180.0) {
+                        hideSoftKeyboard()
+                        closeFullPage()
+                        selectCoordinateOnMap(LatLng(lat, lng), "Copied Location", "", 16.5)
+                        return@setOnClickListener
+                    }
+                }
+                val clean = normalized.lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.take(64).orEmpty()
+                if (clean.isNotBlank()) {
+                    etQuery.setText(clean)
+                    etQuery.setSelection(clean.length)
+                }
+            }
+        }
         searchBox.addView(etQuery)
+        searchBox.addView(btnPasteJump)
         searchBox.addView(btnClearQuery)
         body.addView(searchBox)
 

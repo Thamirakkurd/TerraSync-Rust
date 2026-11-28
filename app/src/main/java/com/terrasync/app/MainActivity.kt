@@ -232,6 +232,89 @@ class MainActivity : AppCompatActivity() {
         if (uri != null) handleImportUri(uri)
     }
 
+    private val backupCreateLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        if (uri == null) return@registerForActivityResult
+        Toast.makeText(this, "Creating TerraSync backup...", Toast.LENGTH_SHORT).show()
+        AppExecutors.batchIoExecutor.execute {
+            val res = BackupManager.exportToUri(applicationContext, uri, getInstalledVersionName())
+            AppExecutors.postMain {
+                if (!isActivityAlive()) return@postMain
+                res.onSuccess { s ->
+                    Toast.makeText(
+                        this,
+                        "Backup saved (${s.layerCount} folders, ${s.pinCount} pins)",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }.onFailure { e ->
+                    Toast.makeText(this, e.message ?: "Backup failed", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private val backupRestoreLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@registerForActivityResult
+        AppExecutors.batchIoExecutor.execute {
+            val inspect = BackupManager.inspectBackupUri(applicationContext, uri)
+            AppExecutors.postMain {
+                if (!isActivityAlive()) return@postMain
+                inspect.onFailure { e ->
+                    Toast.makeText(this, e.message ?: "Invalid backup file", Toast.LENGTH_LONG).show()
+                }.onSuccess { info ->
+                    val dateStr = if (info.exportedAt > 0L) {
+                        java.text.SimpleDateFormat("dd MMM yyyy HH:mm", java.util.Locale.US)
+                            .format(java.util.Date(info.exportedAt))
+                    } else "Unknown date"
+                    val counts = if (info.layerCount >= 0 && info.pinCount >= 0) {
+                        "${info.layerCount} local folders • ${info.pinCount} pins"
+                    } else "Local folders & settings"
+                    showThemedDialog(
+                        themedDialogBuilder("Restore TerraSync Backup?")
+                            .setMessage("Backup from $dateStr (v${info.appVersion})\n$counts\n\nThis will replace current local folders and settings.")
+                            .setPositiveButton("Restore") { _, _ ->
+                                Toast.makeText(this, "Restoring backup...", Toast.LENGTH_SHORT).show()
+                                AppExecutors.batchIoExecutor.execute {
+                                    val res = BackupManager.restoreFromUri(applicationContext, uri)
+                                    AppExecutors.postMain {
+                                        if (!isActivityAlive()) return@postMain
+                                        res.onSuccess { restored ->
+                                            repository.refreshJoinedSync()
+                                            repository.applyMergedFolders()
+                                            renderMapData()
+                                            Toast.makeText(
+                                                this,
+                                                "Restored ${restored.layerCount} folders & ${restored.pinCount} pins",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }.onFailure { e ->
+                                            Toast.makeText(this, e.message ?: "Restore failed", Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                }
+                            }
+                            .setNegativeButton("Cancel", null)
+                            .create(),
+                        true
+                    )
+                }
+            }
+        }
+    }
+
+    internal fun launchExportBackup() {
+        runCatching { backupCreateLauncher.launch(BackupManager.suggestedFileName()) }
+            .onFailure { Toast.makeText(this, "Could not open file saver", Toast.LENGTH_SHORT).show() }
+    }
+
+    internal fun launchRestoreBackup() {
+        runCatching { backupRestoreLauncher.launch(arrayOf("*/*")) }
+            .onFailure { Toast.makeText(this, "Could not open file picker", Toast.LENGTH_SHORT).show() }
+    }
+
     private val locPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { perms ->

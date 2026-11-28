@@ -85,14 +85,29 @@ class SyncRepo(context: Context? = null) {
         runCatching {
             val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val cb = object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
+                private fun refreshConnectivityAndAuth() {
                     mainHandler.post {
+                        val onlineNow = isOnline()
+                        if (onlineNow && currentUid().isNullOrBlank()) {
+                            ensureAuthenticated()
+                        }
                         val next = computeConnected()
                         if (next != connected) {
                             connected = next
                             emitNow()
                         }
                     }
+                }
+
+                override fun onAvailable(network: Network) {
+                    refreshConnectivityAndAuth()
+                }
+
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: NetworkCapabilities
+                ) {
+                    refreshConnectivityAndAuth()
                 }
 
                 override fun onLost(network: Network) {
@@ -159,10 +174,28 @@ class SyncRepo(context: Context? = null) {
             return
         }
 
-        val remaining = AtomicInteger(chunks.size)
         val firstError = AtomicReference<String?>(null)
         val finished = AtomicBoolean(false)
 
+        if (!online) {
+            chunks.forEach { chunk ->
+                val batch = db.batch()
+                chunk.forEach { op ->
+                    if (op.merge) batch.set(op.ref, op.data, SetOptions.merge()) else batch.set(op.ref, op.data)
+                }
+                batch.commit()
+            }
+            if (finished.compareAndSet(false, true)) {
+                onDone(true, "$successMsg (offline — will sync when online)", shareCode)
+            }
+            return
+        }
+
+        val timeoutMs = if (requireServerCommit) {
+            maxOf(30_000L, chunks.size * 10_000L).coerceAtMost(120_000L)
+        } else {
+            maxOf(15_000L, chunks.size * 6_000L).coerceAtMost(60_000L)
+        }
         val timeoutRunnable = Runnable {
             if (finished.compareAndSet(false, true)) {
                 val err = firstError.get()
@@ -175,35 +208,44 @@ class SyncRepo(context: Context? = null) {
                 }
             }
         }
-        if (online) {
-            mainHandler.postDelayed(timeoutRunnable, if (requireServerCommit) 25_000L else 12_000L)
-        }
+        mainHandler.postDelayed(timeoutRunnable, timeoutMs)
 
-        chunks.forEach { chunk ->
+        fun commitChunk(index: Int, attempt: Int) {
+            if (finished.get()) return
+            if (index >= chunks.size) {
+                if (finished.compareAndSet(false, true)) {
+                    mainHandler.removeCallbacks(timeoutRunnable)
+                    onDone(true, successMsg, shareCode)
+                }
+                return
+            }
+            val chunk = chunks[index]
             val batch = db.batch()
             chunk.forEach { op ->
                 if (op.merge) batch.set(op.ref, op.data, SetOptions.merge()) else batch.set(op.ref, op.data)
             }
             batch.commit()
-                .addOnFailureListener { e ->
-                    firstError.compareAndSet(null, e.message ?: "Batch write failed")
+                .addOnSuccessListener {
+                    commitChunk(index + 1, 0)
                 }
-                .addOnCompleteListener {
-                    if (remaining.decrementAndGet() == 0 && finished.compareAndSet(false, true)) {
-                        mainHandler.removeCallbacks(timeoutRunnable)
-                        val err = firstError.get()
-                        if (err != null) {
-                            onDone(false, "Sync error: $err", shareCode)
-                        } else {
-                            onDone(true, successMsg, shareCode)
+                .addOnFailureListener { e ->
+                    val code = (e as? FirebaseFirestoreException)?.code
+                    val retryable = code == FirebaseFirestoreException.Code.UNAVAILABLE ||
+                        code == FirebaseFirestoreException.Code.DEADLINE_EXCEEDED ||
+                        code == FirebaseFirestoreException.Code.ABORTED ||
+                        code == FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED
+                    if (retryable && attempt < 2 && !finished.get()) {
+                        mainHandler.postDelayed({ commitChunk(index, attempt + 1) }, 800L * (attempt + 1))
+                    } else {
+                        firstError.compareAndSet(null, e.message ?: "Batch write failed")
+                        if (finished.compareAndSet(false, true)) {
+                            mainHandler.removeCallbacks(timeoutRunnable)
+                            onDone(false, "Sync error: ${firstError.get()}", shareCode)
                         }
                     }
                 }
         }
-
-        if (!online && finished.compareAndSet(false, true)) {
-            onDone(true, "$successMsg (offline — will sync when online)", shareCode)
-        }
+        commitChunk(0, 0)
     }
 
     fun syncJoinedLayers(
@@ -633,6 +675,15 @@ class SyncRepo(context: Context? = null) {
         return PinEditHistoryAudit.prependHistoryLine(newLine, existingHistory)
     }
 
+    private fun mergeHistoryUnion(newLine: String, remoteHistory: String, localHistory: String): String {
+        val merged = LinkedHashSet<String>()
+        val cleanNew = newLine.trim()
+        if (cleanNew.isNotEmpty()) merged.add(cleanNew)
+        remoteHistory.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.forEach { merged.add(it) }
+        localHistory.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.forEach { merged.add(it) }
+        return merged.take(40).joinToString("\n")
+    }
+
     private fun updatePinWithHistory(
         pinId: String,
         newHistoryLine: String,
@@ -650,7 +701,7 @@ class SyncRepo(context: Context? = null) {
         db.runTransaction { tx ->
             val snap = tx.get(docRef)
             val liveHistory = snap.getString("editHistory") ?: fallbackHistory
-            val mergedHistory = buildHistory(newHistoryLine, liveHistory)
+            val mergedHistory = mergeHistoryUnion(newHistoryLine, liveHistory, fallbackHistory)
             tx.update(docRef, baseFields + ("editHistory" to mergedHistory))
             null
         }.addOnFailureListener { e ->
