@@ -502,12 +502,37 @@ class SearchController(
             Toast.makeText(activity, "Waiting for GPS fix first", Toast.LENGTH_SHORT).show()
             return
         }
+        val snap = viewModel.folderSnapshot
+        val pinsSnap = snap.pins
         val hidden = DevicePrefs.getHiddenLayerIds(activity)
         val sentIds = if (viewModel.hideSentPins) DevicePrefs.getLocalSentPinIds(activity) else emptySet()
-        val pending = viewModel.folderSnapshot.pins.filter {
-            it.layerId !in hidden && PinStatus.fromRaw(it.status) == PinStatus.PENDING && it.id !in sentIds
+        val nativeHit = RustCoreBridge.findNearestPin(
+            version = snap.dataVersion,
+            pins = pinsSnap,
+            statusMask = 1 shl 2,
+            hiddenLayerIds = hidden,
+            sentIds = sentIds,
+            lat = loc.latitude,
+            lng = loc.longitude
+        )
+        val nearest = if (nativeHit != null) {
+            val idx = nativeHit.first
+            if (idx in pinsSnap.indices) pinsSnap[idx] else null
+        } else {
+            var best: PinItem? = null
+            var bestDist = Double.POSITIVE_INFINITY
+            for (pin in pinsSnap) {
+                if (pin.layerId in hidden || pin.id in sentIds) continue
+                if (PinStatus.fromRaw(pin.status) != PinStatus.PENDING) continue
+                if (bestDist.isFinite() && kotlin.math.abs(pin.lat - loc.latitude) * 110_000.0 >= bestDist) continue
+                val d = RoutingEngine.haversineMeters(loc.latitude, loc.longitude, pin.lat, pin.lng)
+                if (d < bestDist) {
+                    bestDist = d
+                    best = pin
+                }
+            }
+            best
         }
-        val nearest = pending.minByOrNull { RoutingEngine.haversineMeters(loc.latitude, loc.longitude, it.lat, it.lng) }
         if (nearest == null) {
             val msg = if (viewModel.hideSentPins) "No unsent pending pins in visible folders!" else "No pending pins in visible folders!"
             Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()

@@ -254,6 +254,50 @@ pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeQuerySearchIn
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeFindNearestPin<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    expected_len: jint,
+    query_payload: JByteArray<'local>,
+) -> jbyteArray {
+    if expected_len < 0 {
+        return std::ptr::null_mut();
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let bytes = env.convert_byte_array(&query_payload).ok()?;
+        let out = crate::geojson::find_nearest_pin(version, expected_len as usize, &bytes)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result {
+        Ok(Some(raw)) => raw,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeCountVisibleStatuses<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    version: jlong,
+    expected_len: jint,
+    filter_payload: JByteArray<'local>,
+) -> jbyteArray {
+    if expected_len < 0 {
+        return std::ptr::null_mut();
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let bytes = env.convert_byte_array(&filter_payload).ok()?;
+        let out = crate::geojson::count_visible_statuses(version, expected_len as usize, &bytes)?;
+        env.byte_array_from_slice(&out).ok().map(|arr| arr.into_raw())
+    }));
+    match result {
+        Ok(Some(raw)) => raw,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_terrasync_app_RustCoreBridge_nativeLoadGeoPins<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,

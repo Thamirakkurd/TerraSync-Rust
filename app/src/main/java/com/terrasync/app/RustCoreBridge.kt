@@ -54,6 +54,8 @@ object RustCoreBridge {
         elev: FloatArray, z: Int, x: Int, y: Int, n: Int, step: Int, majorStep: Int
     ): ByteArray?
     @JvmStatic private external fun nativeQuerySearchIndex(version: Long, expectedLen: Int, queryPayload: ByteArray): ByteArray?
+    @JvmStatic private external fun nativeFindNearestPin(version: Long, expectedLen: Int, queryPayload: ByteArray): ByteArray?
+    @JvmStatic private external fun nativeCountVisibleStatuses(version: Long, expectedLen: Int, filterPayload: ByteArray): ByteArray?
     @JvmStatic private external fun nativeLoadGeoPins(version: Long, payload: ByteArray): Boolean
     @JvmStatic private external fun nativeIsGeoPinsSynced(version: Long, expectedLen: Int): Boolean
     @JvmStatic private external fun nativeSetMvtPinsFilter(payload: ByteArray): Boolean
@@ -212,6 +214,69 @@ object RustCoreBridge {
                 if (dists != null) dists[i] = bb.double
             }
             indices to dists
+        }.getOrNull()
+    }
+
+    fun findNearestPin(
+        version: Long,
+        pins: List<PinItem>,
+        statusMask: Int,
+        hiddenLayerIds: Set<String>,
+        sentIds: Set<String>,
+        lat: Double,
+        lng: Double
+    ): Pair<Int, Double>? {
+        if (!loaded) return null
+        if (pins.isEmpty()) return -1 to 0.0
+        return runCatching {
+            val out = ByteArrayOutputStream(64 + hiddenLayerIds.size * 24 + sentIds.size * 24)
+            val nb = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putDouble(v: Double) { nb.clear(); nb.putDouble(v); out.write(nb.array(), 0, 8) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+            out.write(statusMask and 0xFF)
+            putDouble(lat)
+            putDouble(lng)
+            putInt(hiddenLayerIds.size)
+            for (h in hiddenLayerIds) putStr(h)
+            putInt(sentIds.size)
+            for (s in sentIds) putStr(s)
+            val qBytes = out.toByteArray()
+            val res = nativeFindNearestPin(version, pins.size, qBytes) ?: run {
+                if (!syncGeoPins(version, pins)) return@runCatching null
+                nativeFindNearestPin(version, pins.size, qBytes) ?: return@runCatching null
+            }
+            val bb = ByteBuffer.wrap(res).order(ByteOrder.LITTLE_ENDIAN)
+            val idx = bb.int
+            val dist = bb.double
+            idx to dist
+        }.getOrNull()
+    }
+
+    fun countVisibleStatuses(
+        version: Long,
+        pins: List<PinItem>,
+        hiddenLayerIds: Set<String>,
+        sentIds: Set<String> = emptySet()
+    ): IntArray? {
+        if (!loaded) return null
+        if (pins.isEmpty()) return intArrayOf(0, 0, 0, 0)
+        return runCatching {
+            val out = ByteArrayOutputStream(32 + hiddenLayerIds.size * 24 + sentIds.size * 24)
+            val nb = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
+            fun putInt(v: Int) { nb.clear(); nb.putInt(v); out.write(nb.array(), 0, 4) }
+            fun putStr(s: String) { val b = s.toByteArray(Charsets.UTF_8); putInt(b.size); if (b.isNotEmpty()) out.write(b) }
+            putInt(hiddenLayerIds.size)
+            for (h in hiddenLayerIds) putStr(h)
+            putInt(sentIds.size)
+            for (s in sentIds) putStr(s)
+            val fBytes = out.toByteArray()
+            val res = nativeCountVisibleStatuses(version, pins.size, fBytes) ?: run {
+                if (!syncGeoPins(version, pins)) return@runCatching null
+                nativeCountVisibleStatuses(version, pins.size, fBytes) ?: return@runCatching null
+            }
+            val bb = ByteBuffer.wrap(res).order(ByteOrder.LITTLE_ENDIAN)
+            intArrayOf(bb.int, bb.int, bb.int, bb.int)
         }.getOrNull()
     }
 

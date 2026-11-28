@@ -829,6 +829,136 @@ pub fn find_exact_stacked_pins(version: i64, expected_len: usize, payload: &[u8]
     Some(out)
 }
 
+
+/// Wave 13: Finds the nearest matching pin in the resident `GEO_PINS_CACHE`.
+/// Query wire:
+///   [u8 status_mask (bit0=done, bit1=issue, bit2=pending)]
+///   [f64 lat] [f64 lng]
+///   [u32 hidden_count] [hidden_layer_ids...]
+///   [u32 sent_count] [sent_pin_ids...]
+/// Output wire (12 bytes):
+///   [i32 best_idx (-1 if none)] [f64 best_dist_m]
+pub fn find_nearest_pin(
+    version: i64,
+    expected_len: usize,
+    query_payload: &[u8],
+) -> Option<Vec<u8>> {
+    let mut r = BinReader::new(query_payload);
+    let status_mask = r.read_u8()?;
+    let q_lat = r.read_f64()?;
+    let q_lng = r.read_f64()?;
+    if !q_lat.is_finite() || !q_lng.is_finite() {
+        return None;
+    }
+    let hidden_count = r.read_u32()? as usize;
+    let mut hidden_layers: HashSet<&str> = HashSet::with_capacity(hidden_count.min(4096));
+    for _ in 0..hidden_count {
+        hidden_layers.insert(r.read_str()?);
+    }
+    let sent_count = r.read_u32()? as usize;
+    let mut sent_ids: HashSet<&str> = HashSet::with_capacity(sent_count.min(250_000));
+    for _ in 0..sent_count {
+        sent_ids.insert(r.read_str()?);
+    }
+
+    let guard = cache_lock().read().ok()?;
+    let cached = guard.as_ref()?;
+    if cached.version != version || cached.pins.len() != expected_len {
+        return None;
+    }
+
+    let has_hidden = !hidden_layers.is_empty();
+    let has_sent = !sent_ids.is_empty();
+    let mut best_idx: i32 = -1;
+    let mut best_dist: f64 = f64::INFINITY;
+
+    for (idx, p) in cached.pins.iter().enumerate() {
+        if (status_mask & (1u8 << p.status_code.min(7))) == 0 {
+            continue;
+        }
+        if !p.lat.is_finite() || !p.lng.is_finite() {
+            continue;
+        }
+        if has_hidden && hidden_layers.contains(p.layer_id.as_str()) {
+            continue;
+        }
+        if has_sent && sent_ids.contains(p.id.as_str()) {
+            continue;
+        }
+        // Conservative latitude lower bound (1 deg lat >= 110,574m everywhere on Earth)
+        if best_dist.is_finite() && (p.lat - q_lat).abs() * 110_000.0 >= best_dist {
+            continue;
+        }
+        let d = haversine_meters(q_lat, q_lng, p.lat, p.lng);
+        if d < best_dist {
+            best_dist = d;
+            best_idx = idx as i32;
+        }
+    }
+
+    let mut out = Vec::with_capacity(12);
+    out.extend_from_slice(&best_idx.to_le_bytes());
+    out.extend_from_slice(&(if best_idx >= 0 { best_dist } else { 0.0 }).to_le_bytes());
+    Some(out)
+}
+
+/// Wave 13: Counts visible Done / Issue / Pending pins in a single pass over `GEO_PINS_CACHE`.
+/// Filter wire:
+///   [u32 hidden_count] [hidden_layer_ids...]
+///   [u32 sent_count] [sent_pin_ids...]
+/// Output wire (16 bytes):
+///   [u32 total_visible] [u32 done] [u32 issue] [u32 pending]
+pub fn count_visible_statuses(
+    version: i64,
+    expected_len: usize,
+    filter_payload: &[u8],
+) -> Option<Vec<u8>> {
+    let mut r = BinReader::new(filter_payload);
+    let hidden_count = r.read_u32()? as usize;
+    let mut hidden_layers: HashSet<&str> = HashSet::with_capacity(hidden_count.min(4096));
+    for _ in 0..hidden_count {
+        hidden_layers.insert(r.read_str()?);
+    }
+    let sent_count = r.read_u32()? as usize;
+    let mut sent_ids: HashSet<&str> = HashSet::with_capacity(sent_count.min(250_000));
+    for _ in 0..sent_count {
+        sent_ids.insert(r.read_str()?);
+    }
+
+    let guard = cache_lock().read().ok()?;
+    let cached = guard.as_ref()?;
+    if cached.version != version || cached.pins.len() != expected_len {
+        return None;
+    }
+
+    let has_hidden = !hidden_layers.is_empty();
+    let has_sent = !sent_ids.is_empty();
+    let mut done: u32 = 0;
+    let mut issue: u32 = 0;
+    let mut pending: u32 = 0;
+
+    for p in &cached.pins {
+        if has_hidden && hidden_layers.contains(p.layer_id.as_str()) {
+            continue;
+        }
+        if has_sent && sent_ids.contains(p.id.as_str()) {
+            continue;
+        }
+        match p.status_code {
+            0 => done += 1,
+            1 => issue += 1,
+            _ => pending += 1,
+        }
+    }
+    let total = done + issue + pending;
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(&total.to_le_bytes());
+    out.extend_from_slice(&done.to_le_bytes());
+    out.extend_from_slice(&issue.to_le_bytes());
+    out.extend_from_slice(&pending.to_le_bytes());
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

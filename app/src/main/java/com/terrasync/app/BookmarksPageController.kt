@@ -875,8 +875,8 @@ class BookmarksPageController(
                                 }
                                 row1.addView(buildGridTile("Zoom Map", R.drawable.ic_my_location, addEndGap = false) {
                                     val freshSnap = viewModel.folderSnapshot
-                                    val freshPins = freshSnap.pins.filter { it.layerId == layer.id }
-                                    val freshTracks = freshSnap.tracks.filter { it.layerId == layer.id }
+                                    val freshPins = freshSnap.pinsByLayerId[layer.id].orEmpty()
+                                    val freshTracks = freshSnap.tracksByLayerId[layer.id].orEmpty()
                                     closeFullPage()
                                     zoomToKmlBounds(collectLayerLatLngs(freshPins, freshTracks), layer.id)
                                 })

@@ -731,4 +731,75 @@ Done Note: Meter Linked</description><Point><coordinates>{:.5},{:.5},0</coordina
         );
     }
 
+
+    #[test]
+    fn bench_wave13_nearest_and_counts_20k() {
+        let _lock = crate::geojson::TEST_CACHE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::geojson::clear_geo_pins();
+
+        fn put_s(buf: &mut Vec<u8>, s: &str) {
+            buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            buf.extend_from_slice(s.as_bytes());
+        }
+
+        let n = 20_000usize;
+        let mut load = Vec::with_capacity(n * 64 + 64);
+        put_s(&mut load, "pin-done");
+        put_s(&mut load, "pin-issue");
+        put_s(&mut load, "pin-pending");
+        load.extend_from_slice(&(n as u32).to_le_bytes());
+        for i in 0..n {
+            put_s(&mut load, &format!("p-{i}"));
+            put_s(&mut load, if i % 4 == 0 { "f_hidden" } else { "f_vis" });
+            put_s(&mut load, &format!("M-{i}"));
+            load.push((i % 3) as u8);
+            let lng = 43.80 + (i % 200) as f64 * 0.001;
+            let lat = 36.65 + (i / 200) as f64 * 0.001;
+            load.extend_from_slice(&lng.to_le_bytes());
+            load.extend_from_slice(&lat.to_le_bytes());
+        }
+        assert!(crate::geojson::load_geo_pins(4000, &load));
+
+        // Nearest PENDING pin excluding f_hidden
+        let mut q = Vec::new();
+        q.push(1u8 << 2); // pending only
+        q.extend_from_slice(&36.7001_f64.to_le_bytes());
+        q.extend_from_slice(&43.9001_f64.to_le_bytes());
+        q.extend_from_slice(&1u32.to_le_bytes());
+        put_s(&mut q, "f_hidden");
+        q.extend_from_slice(&0u32.to_le_bytes());
+
+        let t0 = Instant::now();
+        let res = crate::geojson::find_nearest_pin(4000, n, &q).unwrap();
+        let nearest_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        let idx = i32::from_le_bytes(res[0..4].try_into().unwrap());
+        let dist = f64::from_le_bytes(res[4..12].try_into().unwrap());
+        assert!(idx >= 0 && (idx as usize) % 3 == 2 && (idx as usize) % 4 != 0);
+        assert!(dist < 500.0);
+
+        // Count visible statuses excluding f_hidden
+        let mut cf = Vec::new();
+        cf.extend_from_slice(&1u32.to_le_bytes());
+        put_s(&mut cf, "f_hidden");
+        cf.extend_from_slice(&0u32.to_le_bytes());
+
+        let t1 = Instant::now();
+        let cres = crate::geojson::count_visible_statuses(4000, n, &cf).unwrap();
+        let counts_us = t1.elapsed().as_secs_f64() * 1_000_000.0;
+        let total = u32::from_le_bytes(cres[0..4].try_into().unwrap());
+        let done = u32::from_le_bytes(cres[4..8].try_into().unwrap());
+        let issue = u32::from_le_bytes(cres[8..12].try_into().unwrap());
+        let pending = u32::from_le_bytes(cres[12..16].try_into().unwrap());
+        assert_eq!(total, 15_000);
+        assert_eq!(done + issue + pending, 15_000);
+
+        crate::geojson::clear_geo_pins();
+        println!(
+            "WAVE13_BENCH | nearest_pending_20k={:.1} us (idx={}, {:.1}m) | count_statuses_20k={:.1} us ({}/{}/{})",
+            nearest_us, idx, dist, counts_us, done, issue, pending
+        );
+    }
+
 }

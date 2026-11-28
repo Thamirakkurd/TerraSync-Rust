@@ -140,19 +140,43 @@ private class TerraSyncCarFoldersScreen(carContext: CarContext) : Screen(carCont
         val visibleLayers = layers
             .filter { it.id !in hidden }
             .sortedWith(compareByDescending<LayerItem> { it.id in pinnedIds }.thenByDescending { it.updatedAt })
-        val visiblePins = pins.filter { it.layerId !in hidden }
+        val myLoc = getLastKnownLocation()
+        val visiblePins = ArrayList<PinItem>(pins.size)
+        val pinsByLayer = HashMap<String, ArrayList<PinItem>>(visibleLayers.size.coerceAtLeast(8))
+        var pendingCount = 0
+        var issueCount = 0
+        var nearestUnfinished: PinItem? = null
+        var nearestDistM = Double.POSITIVE_INFINITY
+        var firstIssue: PinItem? = null
+        var firstPending: PinItem? = null
+        for (pin in pins) {
+            if (pin.layerId in hidden) continue
+            visiblePins.add(pin)
+            pinsByLayer.getOrPut(pin.layerId) { ArrayList() }.add(pin)
+            val st = PinStatus.fromRaw(pin.status)
+            if (st == PinStatus.PENDING) {
+                pendingCount++
+                if (firstPending == null) firstPending = pin
+            } else if (st == PinStatus.ISSUE) {
+                issueCount++
+                if (firstIssue == null) firstIssue = pin
+            }
+            if (st != PinStatus.DONE && myLoc != null) {
+                if (!nearestDistM.isFinite() || kotlin.math.abs(pin.lat - myLoc.latitude) * 110_000.0 < nearestDistM) {
+                    val d = RoutingEngine.haversineMeters(myLoc.latitude, myLoc.longitude, pin.lat, pin.lng)
+                    if (d < nearestDistM) {
+                        nearestDistM = d
+                        nearestUnfinished = pin
+                    }
+                }
+            }
+        }
+        if (myLoc == null) {
+            nearestUnfinished = firstIssue ?: firstPending
+        }
         var headerCount = 0
 
         if (visiblePins.isNotEmpty()) {
-            val myLoc = getLastKnownLocation()
-            val nearestUnfinished = if (myLoc != null) {
-                visiblePins
-                    .filter { PinStatus.fromRaw(it.status) != PinStatus.DONE }
-                    .minByOrNull { RoutingEngine.haversineMeters(myLoc.latitude, myLoc.longitude, it.lat, it.lng) }
-            } else {
-                visiblePins.firstOrNull { PinStatus.fromRaw(it.status) == PinStatus.ISSUE }
-                    ?: visiblePins.firstOrNull { PinStatus.fromRaw(it.status) == PinStatus.PENDING }
-            }
             if (nearestUnfinished != null) {
                 val folderTitle = visibleLayers.find { it.id == nearestUnfinished.layerId }?.name
                     ?: layers.find { it.id == nearestUnfinished.layerId }?.name
@@ -182,8 +206,6 @@ private class TerraSyncCarFoldersScreen(carContext: CarContext) : Screen(carCont
                 headerCount++
             }
 
-            val pendingCount = visiblePins.count { PinStatus.fromRaw(it.status) == PinStatus.PENDING }
-            val issueCount = visiblePins.count { PinStatus.fromRaw(it.status) == PinStatus.ISSUE }
             listBuilder.addItem(
                 Row.Builder()
                     .setTitle("All Visible Pins (${visiblePins.size})")
@@ -204,9 +226,16 @@ private class TerraSyncCarFoldersScreen(carContext: CarContext) : Screen(carCont
 
         val folderSlots = (6 - headerCount).coerceAtLeast(0)
         visibleLayers.take(folderSlots).forEach { layer ->
-            val folderPins = pins.filter { it.layerId == layer.id }
-            val pending = folderPins.count { PinStatus.fromRaw(it.status) == PinStatus.PENDING }
-            val issues = folderPins.count { PinStatus.fromRaw(it.status) == PinStatus.ISSUE }
+            val folderPins = pinsByLayer[layer.id].orEmpty()
+            var pending = 0
+            var issues = 0
+            for (fp in folderPins) {
+                when (PinStatus.fromRaw(fp.status)) {
+                    PinStatus.PENDING -> pending++
+                    PinStatus.ISSUE -> issues++
+                    else -> {}
+                }
+            }
             val isPinned = layer.id in pinnedIds
             val prefix = if (isPinned) "★ " else ""
             val subPrefix = if (isPinned) "Pinned • " else ""

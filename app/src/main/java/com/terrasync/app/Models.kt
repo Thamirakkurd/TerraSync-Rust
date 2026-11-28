@@ -123,7 +123,10 @@ enum class PinStatus(
 
     companion object {
         fun fromRaw(raw: String?): PinStatus {
-            val s = raw?.trim()?.lowercase(java.util.Locale.US).orEmpty()
+            if (raw == null || raw.isEmpty() || raw == "pending") return PENDING
+            if (raw == "done") return DONE
+            if (raw == "issue") return ISSUE
+            val s = raw.trim().lowercase(java.util.Locale.US)
             if (s.isEmpty() || s == "pending" || s.startsWith("pending:") || s.startsWith("pending ") || s == "todo" || s == "open") {
                 return PENDING
             }

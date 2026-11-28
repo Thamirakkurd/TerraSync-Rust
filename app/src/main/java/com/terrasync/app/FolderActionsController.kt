@@ -45,12 +45,24 @@ class FolderActionsController(
 
     fun showExportKmlDialog(layer: LayerItem, layerPins: List<PinItem>, layerTracks: List<TrackItem>) {
         val sentIds = DevicePrefs.getLocalSentPinIds(activity)
-        val sentInLayer = layerPins.count { it.id in sentIds }
-        val unsentPins = layerPins.filter { it.id !in sentIds }
-        val pendingPins = layerPins.filter { PinStatus.fromRaw(it.status) == PinStatus.PENDING }
-        val pendingUnsentPins = pendingPins.filter { it.id !in sentIds }
-        val issuePins = layerPins.filter { PinStatus.fromRaw(it.status) == PinStatus.ISSUE }
-        val donePins = layerPins.filter { PinStatus.fromRaw(it.status) == PinStatus.DONE }
+        var sentInLayer = 0
+        val unsentPins = ArrayList<PinItem>(layerPins.size)
+        val pendingPins = ArrayList<PinItem>()
+        val pendingUnsentPins = ArrayList<PinItem>()
+        val issuePins = ArrayList<PinItem>()
+        val donePins = ArrayList<PinItem>()
+        for (p in layerPins) {
+            val isSent = p.id in sentIds
+            if (isSent) sentInLayer++ else unsentPins.add(p)
+            when (PinStatus.fromRaw(p.status)) {
+                PinStatus.PENDING -> {
+                    pendingPins.add(p)
+                    if (!isSent) pendingUnsentPins.add(p)
+                }
+                PinStatus.ISSUE -> issuePins.add(p)
+                PinStatus.DONE -> donePins.add(p)
+            }
+        }
 
         val entries = mutableListOf(
             Triple("All Pins (${layerPins.size})", layerPins, ""),
@@ -104,8 +116,12 @@ class FolderActionsController(
             return
         }
         val visibleLayerIds = visibleLayers.mapTo(HashSet(visibleLayers.size)) { it.id }
-        val scopedPins = snap.pins.filter { it.layerId in visibleLayerIds }
-        val scopedTracks = snap.tracks.filter { it.layerId in visibleLayerIds }
+        val scopedPins = ArrayList<PinItem>()
+        val scopedTracks = ArrayList<TrackItem>()
+        for (layer in visibleLayers) {
+            snap.pinsByLayerId[layer.id]?.let { scopedPins.addAll(it) }
+            snap.tracksByLayerId[layer.id]?.let { scopedTracks.addAll(it) }
+        }
         val hasLocal = visibleLayers.any { LocalFolderStore.isLocalLayerId(it.id) }
         val cloudLayersVisible = visibleLayers.filterNot { LocalFolderStore.isLocalLayerId(it.id) }
         val allCloudLive = cloudLayersVisible.isNotEmpty() && cloudLayersVisible.all { repository.syncRepo.isLayerLive(it.id) }

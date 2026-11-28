@@ -21,10 +21,18 @@ internal fun MainActivity.showMultiStatusFilterDialog() {
     sheetContent.layoutDirection = if (isRtl) View.LAYOUT_DIRECTION_RTL else View.LAYOUT_DIRECTION_LTR
 
     val hiddenLayerIds = DevicePrefs.getHiddenLayerIds(this)
-    val visibleFolderPins = pins.filter { it.layerId !in hiddenLayerIds }
-    val cntDone = visibleFolderPins.count { PinStatus.fromRaw(it.status) == PinStatus.DONE }
-    val cntIssue = visibleFolderPins.count { PinStatus.fromRaw(it.status) == PinStatus.ISSUE }
-    val cntPending = visibleFolderPins.size - cntDone - cntIssue
+    var cntDone = 0
+    var cntIssue = 0
+    var cntPending = 0
+    for (pin in pins) {
+        if (pin.layerId in hiddenLayerIds) continue
+        when (PinStatus.fromRaw(pin.status)) {
+            PinStatus.DONE -> cntDone++
+            PinStatus.ISSUE -> cntIssue++
+            PinStatus.PENDING -> cntPending++
+        }
+    }
+    val visibleFolderPinCount = cntDone + cntIssue + cntPending
 
     val header = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
@@ -51,7 +59,7 @@ internal fun MainActivity.showMultiStatusFilterDialog() {
         setTextColor(p.textPrimary)
     })
     titleCol.addView(TextView(this).apply {
-        text = AppStrings.pinsInVisibleFolders(this@showMultiStatusFilterDialog, visibleFolderPins.size)
+        text = AppStrings.pinsInVisibleFolders(this@showMultiStatusFilterDialog, visibleFolderPinCount)
         textSize = 12.5f
         setTextColor(p.textMuted)
         DesignSystem.applyTabularNumerals(this)
