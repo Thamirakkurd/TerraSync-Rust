@@ -383,8 +383,8 @@ class MapLayerRenderer(
             existing.setProperties(
                 PropertyFactory.visibility(if (enabled) Property.VISIBLE else Property.NONE),
                 PropertyFactory.hillshadeExaggeration(if (night) intensity.exaggeration * 0.55f else intensity.exaggeration),
-                PropertyFactory.hillshadeShadowColor(Color.parseColor(if (night) "#0A140D" else "#3C5E2B")),
-                PropertyFactory.hillshadeHighlightColor(Color.parseColor(if (night) "#2A3E31" else "#FFFFFF")),
+                PropertyFactory.hillshadeShadowColor(arrayOf(if (night) "#0A140D" else "#3C5E2B")),
+                PropertyFactory.hillshadeHighlightColor(arrayOf(if (night) "#2A3E31" else "#FFFFFF")),
                 PropertyFactory.hillshadeAccentColor(Color.parseColor(if (night) "#1F3527" else "#5D8346"))
             )
         } else if (enabled) {
@@ -412,10 +412,10 @@ class MapLayerRenderer(
                 val intensity = DevicePrefs.getHillshadeIntensity(context)
                 val hill = HillshadeLayer(HILLSHADE_LAYER, HILLSHADE_SOURCE).withProperties(
                     PropertyFactory.hillshadeExaggeration(if (night) intensity.exaggeration * 0.55f else intensity.exaggeration),
-                    PropertyFactory.hillshadeShadowColor(Color.parseColor(if (night) "#0A140D" else "#3C5E2B")),
-                    PropertyFactory.hillshadeHighlightColor(Color.parseColor(if (night) "#2A3E31" else "#FFFFFF")),
+                    PropertyFactory.hillshadeShadowColor(arrayOf(if (night) "#0A140D" else "#3C5E2B")),
+                    PropertyFactory.hillshadeHighlightColor(arrayOf(if (night) "#2A3E31" else "#FFFFFF")),
                     PropertyFactory.hillshadeAccentColor(Color.parseColor(if (night) "#1F3527" else "#5D8346")),
-                    PropertyFactory.hillshadeIlluminationDirection(315f)
+                    PropertyFactory.hillshadeIlluminationDirection(arrayOf(315f))
                 )
                 val belowLayer = style.layers.firstOrNull { l ->
                     val id = l.id.lowercase()
