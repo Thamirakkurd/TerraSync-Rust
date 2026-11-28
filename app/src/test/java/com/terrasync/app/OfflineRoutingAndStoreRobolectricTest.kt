@@ -573,14 +573,14 @@ class OfflineRoutingAndStoreRobolectricTest {
             val latch = java.util.concurrent.CountDownLatch(2)
             var cb1Snap: FolderIndexSnapshot? = null
             var cb2Snap: FolderIndexSnapshot? = null
-            repo.applyMergedFolders { s1 ->
+            repo.applyMergedFolders(onIndexed = { s1 ->
                 cb1Snap = s1
                 latch.countDown()
-            }
-            repo.applyMergedFolders { s2 ->
+            })
+            repo.applyMergedFolders(onIndexed = { s2 ->
                 cb2Snap = s2
                 latch.countDown()
-            }
+            })
 
             val deadline = System.currentTimeMillis() + 5_000L
             while (latch.count > 0 && System.currentTimeMillis() < deadline) {
